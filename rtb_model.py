@@ -149,7 +149,7 @@ class RTBModel(nn.Module):
             traj = traj[-1, :]
             img = (traj * 127.5 + 128).clip(0, 255).to(torch.uint8)
             logits = self.classifer((img.float() / 255 - torch.tensor(self.classifier_mean).cuda()[None, :, None, None]) / torch.tensor(self.classifier_std).cuda()[None, :, None, None])
-            log_prob = nn.functional.log_softmax(logits, dim=1)
+            log_prob = nn.functional.log_softmax(logits/0.2, dim=1)
             log_r = log_prob[:, self.posterior_class]
         return log_r
         
@@ -169,9 +169,11 @@ class RTBModel(nn.Module):
             logr_x_prime = self.log_reward(x_mean_posterior)
             prior_dist = torch.distributions.Normal(torch.zeros((B,) + tuple(D), device=self.device),
                                                  torch.ones((B,) + tuple(D), device=self.device))
-            logr_prior_x_prime = logr_x_prime + prior_dist.log_prob(x_mean_posterior).sum(tuple(range(1, len(x_mean_posterior.shape)))).to(self.device).detach()
+            logr_prior_x_prime = logr_x_prime #+ prior_dist.log_prob(x_mean_posterior).sum(tuple(range(1, len(x_mean_posterior.shape)))).to(self.device).detach()
             # vargrad
             self.logZ.data = (-logpf_posterior + logpf_prior + logr_prior_x_prime).mean()
+            #print(logpf_posterior, logpf_prior, logr_prior_x_prime, self.logZ.data)
+            #exit()
 
             rtb_loss = 0.5 * (((logpf_posterior + self.logZ - logpf_prior - logr_prior_x_prime) ** 2) - learning_cutoff).relu()
 
@@ -228,7 +230,7 @@ class RTBModel(nn.Module):
             optimizer.step()
             
             if wandb_track:
-                if not it%25 == 0:
+                if not it%50 == 0:
                     wandb.log({"loss": loss.item(), "logZ": self.logZ.detach().cpu().numpy(), "log_r": logr.item(), "classifier_log_prob": classifer_log_prob.item(), "epoch": it})
                 else:
                     with torch.no_grad():
@@ -289,7 +291,7 @@ class RTBModel(nn.Module):
                                                  torch.ones((B,) + tuple(D), device=self.device))
 
         logpf_posterior = normal_dist.log_prob(x).sum(tuple(range(1, len(x.shape)))).to(self.device)
-        logpb = torch.zeros_like(logpf_posterior)
+        logpb = normal_dist.log_prob(x).sum(tuple(range(1, len(x.shape)))).to(self.device)#torch.zeros_like(logpf_posterior)
         dt = -1/(steps+1)
 
         #####
@@ -324,9 +326,11 @@ class RTBModel(nn.Module):
             x = x.detach()
             
             # compute parameters for pb
-            t_next = t + dt
-            pb_drift = self.sde.drift(t_next, x)
-            x_mean_pb = x + pb_drift * (-dt)
+            #t_next = t + dt
+            #pb_drift = self.sde.drift(t_next, x)
+            #x_mean_pb = x + pb_drift * (-dt)
+            pb_drift = -self.sde.drift(t, x_prev)
+            x_mean_pb = x_prev + pb_drift * (dt)
             pb_std = g * (np.abs(dt)) ** (1 / 2)
 
             if save_traj:
@@ -336,7 +340,8 @@ class RTBModel(nn.Module):
             pb_dist = torch.distributions.Normal(x_mean_pb, pb_std)
 
             # compute log-likelihoods of reached pos wrt to prior & posterior models
-            logpb += pb_dist.log_prob(x_prev).sum(tuple(range(1, len(x.shape))))
+            #logpb += pb_dist.log_prob(x_prev).sum(tuple(range(1, len(x.shape))))
+            logpb += pb_dist.log_prob(x).sum(tuple(range(1, len(x.shape))))
             logpf_posterior += pf_post_dist.log_prob(x).sum(tuple(range(1, len(x.shape))))
 
             if torch.any(torch.isnan(x)):

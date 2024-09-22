@@ -14,7 +14,7 @@ from distutils.util import strtobool
 parser = argparse.ArgumentParser()
 
 parser.add_argument('--n_iters', default=10000, type=int, metavar='N', help='Number of training iterations')
-parser.add_argument('-bs', '--batch_size', type=int, default=36, help="Training Batch Size.")
+parser.add_argument('-bs', '--batch_size', type=int, default=64, help="Training Batch Size.")
 parser.add_argument('--lr', '--learning_rate', default=1e-5, type=float, help='Initial learning rate.')
 parser.add_argument('--posterior_class', type=int, default=0, help="Posterior finetuning class")
 parser.add_argument('--diffusion_steps', type=int, default=200)
