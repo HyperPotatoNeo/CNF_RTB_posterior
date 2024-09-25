@@ -11,9 +11,11 @@ from cleanfid import fid
 from torchdiffeq import odeint
 from torchdyn.core import NeuralODE
 from torchcfm.models.unet.unet import UNetModelWrapper
+from torchvision import datasets, transforms
 from cifar10_models.vgg import vgg13_bn
 import wandb
 from tqdm import tqdm
+from cleanfid import fid
 import random
 
 def create_batches(ids, batch_size):
@@ -84,7 +86,7 @@ class VPSDE():
             return coeff, std
 
 class RTBModel(nn.Module):
-    def __init__(self, posterior_class=0, diffusion_steps=200, schedule='cosine', use_rb=False):
+    def __init__(self, posterior_class=0, diffusion_steps=200, schedule='cosine', use_rb=False, temperature=1.0):
         super().__init__()
         self.device = device
         self.sde = VPSDE(beta_schedule='cosine')
@@ -92,6 +94,7 @@ class RTBModel(nn.Module):
         self.logZ = torch.nn.Parameter(torch.tensor(0.).to(self.device))
         self.use_rb = use_rb
         self.posterior_class = posterior_class
+        self.temperature = temperature
         # Posterior noise model
         self.model = UNetModelWrapper(
             dim=(3, 32, 32),
@@ -144,16 +147,16 @@ class RTBModel(nn.Module):
         
     def log_reward(self, x):
         with torch.no_grad():
-            t_span = torch.linspace(0, 1, 100 + 1, device=device)
+            t_span = torch.linspace(0, 1, 20 + 1, device=device)
             traj = self.neural_ode.trajectory(x, t_span=t_span)
             traj = traj[-1, :]
             img = (traj * 127.5 + 128).clip(0, 255).to(torch.uint8)
             logits = self.classifer((img.float() / 255 - torch.tensor(self.classifier_mean).cuda()[None, :, None, None]) / torch.tensor(self.classifier_std).cuda()[None, :, None, None])
-            log_prob = nn.functional.log_softmax(logits/0.2, dim=1)
+            log_prob = nn.functional.log_softmax(logits/self.temperature, dim=1)
             log_r = log_prob[:, self.posterior_class]
         return log_r
         
-    def batched_rtb(self, shape, learning_cutoff=.1):
+    def batched_rtb(self, shape, learning_cutoff=.1, prior_sample=False, iw_logz=False):
         # first pas through, get trajectory & loss for correction
         B, *D = shape
 
@@ -163,15 +166,20 @@ class RTBModel(nn.Module):
                 shape=shape,
                 steps=self.steps,
                 save_traj=True,  # save trajectory fwd
+                prior_sample=prior_sample
             )
             x_mean_posterior, logpf_prior, logpf_posterior = fwd_logs['x_mean_posterior'], fwd_logs['logpf_prior'], fwd_logs['logpf_posterior']
 
             logr_x_prime = self.log_reward(x_mean_posterior)
-            prior_dist = torch.distributions.Normal(torch.zeros((B,) + tuple(D), device=self.device),
-                                                 torch.ones((B,) + tuple(D), device=self.device))
+
             logr_prior_x_prime = logr_x_prime #+ prior_dist.log_prob(x_mean_posterior).sum(tuple(range(1, len(x_mean_posterior.shape)))).to(self.device).detach()
             # vargrad
-            self.logZ.data = (-logpf_posterior + logpf_prior + logr_prior_x_prime).mean()
+            if iw_logz and prior_sample:
+                self.logZ.data = (logr_prior_x_prime).logsumexp(dim=0) - np.log(B)
+            elif iw_logz:
+                self.logZ.data = (-logpf_posterior + logpf_prior + logr_prior_x_prime).logsumexp(dim=0) - np.log(B)
+            else:
+                self.logZ.data = (-logpf_posterior + logpf_prior + logr_prior_x_prime).mean()
             #print(logpf_posterior, logpf_prior, logr_prior_x_prime, self.logZ.data)
             #exit()
 
@@ -191,16 +199,18 @@ class RTBModel(nn.Module):
 
         return rtb_loss.detach().mean(), logr_prior_x_prime.mean(), logr_x_prime.detach().mean()
     
-    def finetune(self, shape, n_iters=100000, learning_rate=1e-5, clip=0.1, wandb_track=False):
+    def finetune(self, shape, n_iters=100000, learning_rate=1e-5, clip=0.1, wandb_track=False, prior_sample=False, iw_logz=False, compute_fid=False):
         B, *D = shape
         param_list = [{'params': self.model.parameters()}]
         optimizer = torch.optim.Adam(param_list, lr=learning_rate)
+        run_name = 'cifar_class_' + str(self.posterior_class) + '_temp_' + str(self.temperature) + '_logz_iw_' + str(iw_logz)
         
         if wandb_track:
             wandb.init(
                 project='cfm_posterior',
                 entity='swish',
                 save_code=True,
+                name=run_name
             )
             hyperparams = {
                 "learning_rate": learning_rate,
@@ -221,16 +231,19 @@ class RTBModel(nn.Module):
                     ax[i, j].axis("off")
             wandb.log({"prior_samples": fig})
             
+        prior_traj = False
         for it in range(n_iters):
             optimizer.zero_grad()
-            loss, logr, classifer_log_prob = self.batched_rtb(shape=shape)
+            loss, logr, classifer_log_prob = self.batched_rtb(shape=shape, prior_sample=prior_traj, iw_logz=iw_logz)
             #loss.backward()
             if clip > 0:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=clip)
             optimizer.step()
+            if prior_sample:
+                prior_traj = not prior_traj    
             
-            if wandb_track:
-                if not it%50 == 0:
+            if wandb_track: 
+                if not it%100 == 0:
                     wandb.log({"loss": loss.item(), "logZ": self.logZ.detach().cpu().numpy(), "log_r": logr.item(), "classifier_log_prob": classifer_log_prob.item(), "epoch": it})
                 else:
                     with torch.no_grad():
@@ -239,7 +252,7 @@ class RTBModel(nn.Module):
                             steps=self.steps
                             )
                         x = logs['x_mean_posterior']
-                        t_span = torch.linspace(0, 1, 100 + 1, device=device)
+                        t_span = torch.linspace(0, 1, 20 + 1, device=device)
                         traj = self.neural_ode.trajectory(x, t_span=t_span)
                         traj = traj[-1, :]
                         img = (traj * 127.5 + 128).clip(0, 255).to(torch.uint8)
@@ -248,7 +261,29 @@ class RTBModel(nn.Module):
                             for j in range(5):
                                 ax[i, j].imshow(img[i * 5 + j].permute(1, 2, 0).cpu().numpy())
                                 ax[i, j].axis("off")
-                    wandb.log({"loss": loss.item(), "logZ": self.logZ.detach().cpu().numpy(), "log_r": logr.item(), "epoch": it, "classifier_log_prob": classifer_log_prob.item(), "posterior_samples": fig})
+                    
+                    if it%1000 == 0 and compute_fid and it>0:
+                        print('COMPUTING FID:')
+                        generated_images_dir = 'generated_cifar10_class_' + str(self.posterior_class)
+                        true_images_dir = 'cifar10_class_' + str(self.posterior_class)
+                        for k in range(60):
+                            with torch.no_grad():
+                                logs = self.forward(
+                                    shape=(100, *D),
+                                    steps=self.steps
+                                    )
+                                x = logs['x_mean_posterior']
+                                t_span = torch.linspace(0, 1, 20 + 1, device=device)
+                                traj = self.neural_ode.trajectory(x, t_span=t_span)
+                                traj = traj[-1, :]
+                                img = (traj * 127.5 + 128).clip(0, 255).to(torch.uint8)
+                                for i, img_tensor in enumerate(img):
+                                    img_pil = transforms.ToPILImage()(img_tensor)
+                                    img_pil.save(os.path.join(generated_images_dir, f'airplane_{k*100 + i}.png'))
+                        fid_score = fid.compute_fid(generated_images_dir, true_images_dir)
+                        wandb.log({"loss": loss.item(), "logZ": self.logZ.detach().cpu().numpy(), "log_r": logr.item(), "epoch": it, "classifier_log_prob": classifer_log_prob.item(), "posterior_samples": fig, "fid_score": fid_score})
+                    else:
+                        wandb.log({"loss": loss.item(), "logZ": self.logZ.detach().cpu().numpy(), "log_r": logr.item(), "epoch": it, "classifier_log_prob": classifer_log_prob.item(), "posterior_samples": fig})
             
     def forward(
             self,
@@ -261,6 +296,7 @@ class RTBModel(nn.Module):
             backward=False,
             x_1=None,
             save_traj=False,
+            prior_sample=False
     ):
         """
         An Euler-Maruyama integration of the model SDE with GFN for RTB
@@ -321,7 +357,9 @@ class RTBModel(nn.Module):
             std = g * (np.abs(dt)) ** (1 / 2)
 
             # compute step
-            if not backward:
+            if prior_sample:
+                x = x - self.sde.drift(t, x) * dt + std * torch.randn_like(x)
+            else:
                 x = x_mean_posterior + std * torch.randn_like(x)
             x = x.detach()
             
