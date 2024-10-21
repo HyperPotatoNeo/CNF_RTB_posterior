@@ -1,7 +1,9 @@
 import torch 
+import numpy as np
 import ImageReward as RM 
 from cifar10_models.vgg import vgg13_bn
 
+from aesthetic_reward.simple_inference import MLP
 import clip 
 
 class ImageRewardPrompt():
@@ -18,16 +20,34 @@ class ImageRewardPrompt():
 
         return logr 
 
+# adapted from https://github.com/christophschuhmann/improved-aesthetic-predictor
 class AestheticPredictor():
     def __init__(self, device):
         self.device = device
-        self.aesthetic_model = RM.load("AestheticPredictor-v1.0").to("cuda")
+
+        self.model = MLP(768)  # CLIP embedding dim is 768 for CLIP ViT L 14
+        s = torch.load("sac+logos+ava1-l14-linearMSE.pth")   # load the model you trained previously or the model available in this repo
+        self.model.load_state_dict(s)
+
+        self.model.to(self.device)
+        self.model.eval()
+        
+        self.clip_model, self.clip_preprocess = clip.load("ViT-L/14", device=device)  #RN50x64   
+
+
+    def normalized(self, a, axis=-1, order=2):
+        l2 = np.atleast_1d(np.linalg.norm(a, order, axis))
+        l2[l2 == 0] = 1
+        return a / np.expand_dims(l2, axis)
 
     def __call__(self, img, *args):
         with torch.no_grad():
-            logr = torch.tensor(self.aesthetic_model.score(img)).to(self.device)
+            img = self.clip_preprocess(img)
+            im_feat = self.clip_model.encode_image(img)
+            im_emb_arr = self.normalized(im_feat.cpu().detach().numpy() )
 
-        return logr
+            prediction = self.model(torch.from_numpy(im_emb_arr).to(self.device).type(torch.cuda.FloatTensor))
+        return prediction 
 
 class CIFARClassifier():
     def __init__(self, device, target_class):
