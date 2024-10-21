@@ -211,7 +211,7 @@ class RTBModel(nn.Module):
         if wandb_track:
             wandb.init(
                 project='cfm_posterior',
-                entity='swish',
+                entity=None, #'swish',
                 save_code=True,
                 name=run_name
             )
