@@ -3,8 +3,8 @@ import numpy as np
 import ImageReward as RM 
 from cifar10_models.vgg import vgg13_bn
 
-from aesthetic_reward.simple_inference import MLP
-import clip 
+#from aesthetic_reward.simple_inference import MLP
+#import clip 
 
 class ImageRewardPrompt():
     def __init__(self, device, prompt):
@@ -20,13 +20,14 @@ class ImageRewardPrompt():
 
         return logr 
 
+"""
 # adapted from https://github.com/christophschuhmann/improved-aesthetic-predictor
 class AestheticPredictor():
     def __init__(self, device):
         self.device = device
 
         self.model = MLP(768)  # CLIP embedding dim is 768 for CLIP ViT L 14
-        s = torch.load("sac+logos+ava1-l14-linearMSE.pth")   # load the model you trained previously or the model available in this repo
+        s = torch.load("./aesthetic_reward/sac+logos+ava1-l14-linearMSE.pth")   # load the model you trained previously or the model available in this repo
         self.model.load_state_dict(s)
 
         self.model.to(self.device)
@@ -48,6 +49,7 @@ class AestheticPredictor():
 
             prediction = self.model(torch.from_numpy(im_emb_arr).to(self.device).type(torch.cuda.FloatTensor))
         return prediction 
+"""
 
 class CIFARClassifier():
     def __init__(self, device, target_class):
