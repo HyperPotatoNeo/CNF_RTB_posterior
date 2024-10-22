@@ -91,7 +91,11 @@ class RTBModel(nn.Module):
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         print(f"Checkpoint loaded from {self.load_ckpt_path}")
-        return model, optimizer
+
+        # get iteration number (number before .pth)
+        it = int(self.load_ckpt_path.split('/')[-1].split('_')[-1].split('.')[0])
+        print("Epoch number: ", it)
+        return model, optimizer, it
 
     # linearly anneal between beta_start and beta_end 
     def get_beta(self, it, anneal, anneal_steps):
@@ -153,7 +157,9 @@ class RTBModel(nn.Module):
         run_name = self.id + '_beta_start_' + str(self.beta_start) + '_beta_end_' + str(self.beta_end) + '_anneal_' + str(anneal) + '_prior_sample_' + str(prior_sample)
         
         if self.load_ckpt:
-            self.model, optimizer = self.load_checkpoint(self.model, optimizer)
+            self.model, optimizer, load_it = self.load_checkpoint(self.model, optimizer)
+        else:
+            load_it = 0
 
         if wandb_track:
             wandb.init(
@@ -179,7 +185,7 @@ class RTBModel(nn.Module):
             wandb.log({"prior_samples": [wandb.Image(img[k], caption = prior_reward[k]) for k in range(len(img))]})
             
         prior_traj = False
-        for it in range(n_iters):
+        for it in range(load_it, n_iters):
             self.beta = self.get_beta(it, anneal, anneal_steps)
             optimizer.zero_grad()
             loss, logr = self.batched_rtb(shape=shape, prior_sample=prior_traj)
