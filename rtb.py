@@ -1,4 +1,4 @@
-
+import os 
 import numpy as np
 import torch
 import torch.nn as nn
@@ -18,6 +18,9 @@ class RTBModel(nn.Module):
                  in_shape,
                  reward_args, 
                  id,
+                 model_save_path,
+                 load_ckpt = False,
+                 load_ckpt_path = None,
                  entity = 'swish',
                  diffusion_steps=100, 
                  beta_start=1.0, 
@@ -53,6 +56,42 @@ class RTBModel(nn.Module):
         self.prior_model = prior_model 
 
         self.reward_model = reward_model 
+
+        self.model_save_path = os.path.expanduser(model_save_path)
+        
+        self.load_ckpt = load_ckpt 
+        if load_ckpt_path is not None:
+            self.load_ckpt_path = os.path.expanduser(load_ckpt_path)
+        else:
+            self.load_ckpt_path = load_ckpt_path 
+
+    def save_checkpoint(self, model, optimizer, epoch, run_name):
+        if self.model_save_path is None:
+            print("Model save path not provided. Checkpoint not saved.")
+            return
+        
+        checkpoint = {
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict()
+        }
+
+        savedir = self.model_save_path + run_name + '/'
+        os.makedirs(savedir, exist_ok=True)
+        
+        filepath = savedir + 'checkpoint_'+str(epoch)+'.pth'
+        torch.save(checkpoint, filepath)
+        print(f"Checkpoint saved at {filepath}")
+
+    def load_checkpoint(self, model, optimizer):
+        if self.load_ckpt_path is None:
+            print("Checkpoint path not provided. Checkpoint not loaded.")
+            return model, optimizer
+        
+        checkpoint = torch.load(self.load_ckpt_path)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        print(f"Checkpoint loaded from {self.load_ckpt_path}")
+        return model, optimizer
 
     # linearly anneal between beta_start and beta_end 
     def get_beta(self, it, anneal, anneal_steps):
@@ -111,8 +150,11 @@ class RTBModel(nn.Module):
         B, *D = shape
         param_list = [{'params': self.model.parameters()}]
         optimizer = torch.optim.Adam(param_list, lr=learning_rate)
-        run_name = self.id + '_beta_start_' + str(self.beta_start) + '_beta_end_' + str(self.beta_end) + '_anneal_' + str(anneal)
+        run_name = self.id + '_beta_start_' + str(self.beta_start) + '_beta_end_' + str(self.beta_end) + '_anneal_' + str(anneal) + '_prior_sample_' + str(prior_sample)
         
+        if self.load_ckpt:
+            self.model, optimizer = self.load_checkpoint(self.model, optimizer)
+
         if wandb_track:
             wandb.init(
                 project='cfm_posterior',
@@ -162,7 +204,9 @@ class RTBModel(nn.Module):
                         post_reward = self.reward_model(img, *self.reward_args)
                         wandb.log({"loss": loss.item(), "logZ": self.logZ.detach().cpu().numpy(), "log_r": logr.item(), "epoch": it, 
                                    "posterior_samples": [wandb.Image(img[k], caption=post_reward[k]) for k in range(len(img))]})
-            
+
+                        # save model and optimizer state
+                        self.save_checkpoint(self.model, optimizer, it, run_name)
     def forward(
             self,
             shape,

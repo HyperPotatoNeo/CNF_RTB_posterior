@@ -25,6 +25,10 @@ parser.add_argument('--beta_end', default=10.0, type=float, help='Final Inverse 
 parser.add_argument('--anneal', default=False, type=strtobool, help='Whether to anneal beta (From beta_start to beta_end)')
 parser.add_argument('--anneal_steps', default=15000, type=int, help="Number of steps for temperature annealing")
 
+parser.add_argument('--save_path', default='~/scratch/CNF_RTB_ckpts/', type=str, help='Path to save model checkpoints')
+parser.add_argument('--load_ckpt', default=False, type=strtobool, help='Whether to load checkpoint')
+parser.add_argument('--load_path', default=None, type=str, help='Path to load model checkpoint')
+
 args = parser.parse_args()
 
 if args.exp == "sd3":
@@ -53,6 +57,9 @@ rtb_model = rtb.RTBModel(
                      in_shape = in_shape, 
                      reward_args = reward_args, 
                      id = id,
+                     model_save_path = args.save_path,
+                     load_ckpt = args.load_ckpt,
+                     load_ckpt_path = args.load_path,
                      entity = args.entity,
                      diffusion_steps = args.diffusion_steps, 
                      beta_start = args.beta_start, 
