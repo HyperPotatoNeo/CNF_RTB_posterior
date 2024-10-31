@@ -34,7 +34,7 @@ class StableDiffusion3():
                 prompt=self.prompt,
                 latents=x,  # Pass the custom latents here
                 num_inference_steps = self.num_inference_steps,
-                guidance_scale = 0.0,
+                guidance_scale = 5.0,
                 height = self.height,
                 width = self.width,
                 num_images_per_prompt=x.shape[0]

@@ -24,7 +24,8 @@ class RTBModel(nn.Module):
                  entity = 'swish',
                  diffusion_steps=100, 
                  beta_start=1.0, 
-                 beta_end=10.0):
+                 beta_end=10.0,
+                 loss_batch_size=64):
         super().__init__()
         self.device = device
         self.sde = VPSDE(device = self.device, beta_schedule='cosine')
@@ -33,7 +34,8 @@ class RTBModel(nn.Module):
         self.beta_start = beta_start
         self.beta_end = beta_end
         self.beta = beta_start
-        self.in_shape = in_shape 
+        self.in_shape = in_shape
+        self.loss_batch_size = loss_batch_size 
 
         # for run name
         self.id = id 
