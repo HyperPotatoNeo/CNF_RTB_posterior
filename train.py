@@ -3,6 +3,7 @@ import argparse
 from distutils.util import strtobool
 
 import rtb 
+import tb 
 import reward_models 
 import prior_models 
 
@@ -10,7 +11,8 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 parser = argparse.ArgumentParser()
 
-parser.add_argument('--exp', default="sd3", type=str, help='Experiment name', choices=['sd3', 'cifar'])
+parser.add_argument('--exp', default="sd3", type=str, help='Experiment name', choices=['sd3_align', 'sd3_aes', 'cifar'])
+parser.add_argument('--tb', default=False, type=strtobool, help='Whether to use tb (vs rtb)')
 parser.add_argument('--n_iters', default=50000, type=int, metavar='N', help='Number of training iterations')
 parser.add_argument('-bs', '--batch_size', type=int, default=64, help="Training Batch Size.")
 parser.add_argument('--lr', '--learning_rate', default=5e-5, type=float, help='Initial learning rate.')
@@ -29,9 +31,14 @@ parser.add_argument('--save_path', default='~/scratch/CNF_RTB_ckpts/', type=str,
 parser.add_argument('--load_ckpt', default=False, type=strtobool, help='Whether to load checkpoint')
 parser.add_argument('--load_path', default=None, type=str, help='Path to load model checkpoint')
 
+parser.add_argument('--langevin', default=False, type=strtobool, help="Whether to use Langevin dynamics for sampling")
+parser.add_argument('--compute_fid', default=False, type=strtobool, help="Whether to compute FID score during training (every 1k steps)")
+
+parser.add_argument('--inference', default='vpsde', type=str, help='Inference method for prior', choices=['vpsde', 'ddpm'])
+
 args = parser.parse_args()
 
-if args.exp == "sd3":
+if args.exp == "sd3_align":
     reward_model = reward_models.ImageRewardPrompt(device = device, prompt = args.prompt)
     reward_args = [args.prompt]
 
@@ -39,7 +46,17 @@ if args.exp == "sd3":
     prior_model = prior_models.StableDiffusion3(prompt = args.prompt, 
                                                 num_inference_steps = 28, 
                                                 device = device)
-    id = args.prompt 
+    id = "align_" + args.prompt 
+
+elif args.exp == "sd3_aes":
+    reward_model = reward_models.AestheticPredictor(device = device)
+    reward_args = []
+
+    in_shape = (16, 64 ,64)
+    prior_model = prior_models.StableDiffusion3(prompt = "", 
+                                                num_inference_steps = 28, 
+                                                device = device)
+    id = "aes_no_prompt"
 
 elif args.exp == "cifar":
 
@@ -50,6 +67,10 @@ elif args.exp == "cifar":
                                           num_inference_steps=20) 
     id = "cifar_target_class_" + str(args.target_class)
 
+
+if args.tb:
+    print("Training with TB")
+
 rtb_model = rtb.RTBModel(
                      device = device, 
                      reward_model = reward_model,
@@ -58,11 +79,18 @@ rtb_model = rtb.RTBModel(
                      reward_args = reward_args, 
                      id = id,
                      model_save_path = args.save_path,
+                     langevin = args.langevin,
+                     inference_type = args.inference,
+                     tb = args.tb,
                      load_ckpt = args.load_ckpt,
                      load_ckpt_path = args.load_path,
                      entity = args.entity,
                      diffusion_steps = args.diffusion_steps, 
                      beta_start = args.beta_start, 
                      beta_end = args.beta_end)
+
+
+if args.langevin:
+    rtb_model.pretrain_trainable_reward(n_iters = args.n_iters, batch_size = args.batch_size, learning_rate = args.lr, wandb_track = args.wandb_track)
 
 rtb_model.finetune(shape=(args.batch_size, *in_shape), n_iters = args.n_iters, wandb_track=args.wandb_track, learning_rate=args.lr, prior_sample=args.prior_sample, anneal=args.anneal, anneal_steps=args.anneal_steps)
