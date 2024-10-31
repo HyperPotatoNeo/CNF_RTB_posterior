@@ -64,3 +64,68 @@ class CIFARClassifier():
         log_prob = torch.nn.functional.log_softmax(logits, dim=1)
         log_r = log_prob[:, self.target_class].to(self.device)
         return log_r 
+    
+    def get_class_logits(self, img, *args):
+        logits = self.classifer((img.float() / 255 - torch.tensor(self.classifier_mean).cuda()[None, :, None, None]) / torch.tensor(self.classifier_std).cuda()[None, :, None, None])
+        log_prob = torch.nn.functional.log_softmax(logits, dim=1)
+        return log_prob
+    
+
+# A trainable reward model, takes as input (in_shape), and 
+# outputs scalar reward
+class TrainableReward(torch.nn.Module):
+    def __init__(self, in_shape, device):
+        super(TrainableReward, self).__init__()
+        
+        self.in_shape = in_shape 
+        self.device = device
+
+        # in_shape is (C, H, W)
+        # conv net from (in_shape) to scalar
+        self.net = torch.nn.Sequential(
+            torch.nn.Conv2d(in_shape[0], 32, 3, 1),
+            torch.nn.ReLU(),
+            torch.nn.Conv2d(32, 64, 3, 1),
+            torch.nn.ReLU(),
+            torch.nn.MaxPool2d(2),
+            torch.nn.Conv2d(64, 64, 3, 1),
+            torch.nn.ReLU(),
+            torch.nn.MaxPool2d(2),
+            torch.nn.Flatten(),
+            torch.nn.Linear(64 * ((in_shape[1] - 4)// 2 - 2)//2 * ((in_shape[2] - 4 )// 2 - 2)//2, 128),
+            torch.nn.ReLU(),
+            torch.nn.Linear(128, 1)
+        ).to(device)
+
+    def forward(self, x):
+        return self.net(x)
+    
+
+    
+class TrainableClassifierReward(torch.nn.Module):
+    def __init__(self, in_shape, device, num_classes = 10):
+        super(TrainableClassifierReward, self).__init__()
+        
+        self.in_shape = in_shape 
+        self.device = device
+        self.num_classes = num_classes
+
+        # in_shape is (C, H, W)
+        # conv net from (in_shape) to scalar
+        self.net = torch.nn.Sequential(
+            torch.nn.Conv2d(in_shape[0], 32, 3, 1),
+            torch.nn.ReLU(),
+            torch.nn.Conv2d(32, 64, 3, 1),
+            torch.nn.ReLU(),
+            torch.nn.MaxPool2d(2),
+            torch.nn.Conv2d(64, 64, 3, 1),
+            torch.nn.ReLU(),
+            torch.nn.MaxPool2d(2),
+            torch.nn.Flatten(),
+            torch.nn.Linear(64 * ((in_shape[1] - 4)// 2 - 2)//2 * ((in_shape[2] - 4 )// 2 - 2)//2, 128),
+            torch.nn.ReLU(),
+            torch.nn.Linear(128, num_classes)
+        ).to(device)
+
+    def forward(self, x):
+        return self.net(x)
