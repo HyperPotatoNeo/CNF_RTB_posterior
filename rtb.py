@@ -310,7 +310,7 @@ class RTBModel(nn.Module):
             # No replay buffer for first 10 iters
             if rand_n < prior_sample_prob:
                 prior_traj = True
-            elif it > 5 and it%2==0:#rand_n < prior_sample_prob + replay_buffer_prob:
+            elif it > 5 and rand_n < prior_sample_prob + replay_buffer_prob:
                 rb_traj = True
                 
             self.beta = self.get_beta(it, anneal, anneal_steps)
