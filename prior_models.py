@@ -5,8 +5,8 @@ from diffusers.schedulers import EulerAncestralDiscreteScheduler
 from huggingface_hub import login
 
 from torchcfm.models.unet.unet import UNetModelWrapper
-from torchdiffeq import odeint
-from torchdyn.core import NeuralODE
+#from torchdiffeq import odeint
+#from torchdyn.core import NeuralODE
 
 
 class StableDiffusion3():
@@ -24,7 +24,7 @@ class StableDiffusion3():
 
         self.pipe = StableDiffusion3Pipeline.from_pretrained(
             "stabilityai/stable-diffusion-3-medium-diffusers",
-            cache_dir = cache_dir, 
+            #cache_dir = cache_dir, 
             torch_dtype=torch.float16
         ).to(self.device)
 

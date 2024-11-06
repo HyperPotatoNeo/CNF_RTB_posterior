@@ -3,15 +3,16 @@ import argparse
 from distutils.util import strtobool
 
 import rtb 
-import tb 
+#import tb 
 import reward_models 
-import prior_models 
+import prior_models
+from replay_buffer import ReplayBuffer
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 parser = argparse.ArgumentParser()
 
-parser.add_argument('--exp', default="sd3", type=str, help='Experiment name', choices=['sd3_align', 'sd3_aes', 'cifar'])
+parser.add_argument('--exp', default="sd3_align", type=str, help='Experiment name', choices=['sd3_align', 'sd3_aes', 'cifar'])
 parser.add_argument('--tb', default=False, type=strtobool, help='Whether to use tb (vs rtb)')
 parser.add_argument('--n_iters', default=50000, type=int, metavar='N', help='Number of training iterations')
 parser.add_argument('-bs', '--batch_size', type=int, default=64, help="Training Batch Size.")
@@ -23,7 +24,10 @@ parser.add_argument('--target_class', type=int, default=0, help='Target class fo
 parser.add_argument('--diffusion_steps', type=int, default=100)
 parser.add_argument('--wandb_track', default=False, type=strtobool, help='Whether to track with wandb.')
 parser.add_argument('--entity', default=None, type=str, help='Wandb entity')
-parser.add_argument('--prior_sample', default=False, type=strtobool, help="Whether to use off policy samples from prior")
+#parser.add_argument('--prior_sample', default=False, type=strtobool, help="Whether to use off policy samples from prior")
+parser.add_argument('--replay_buffer', default='none', type=str, help='Type of replay buffer to use', choices=['none','uniform','reward'])
+parser.add_argument('--prior_sample_prob', default=0.0, type=float, help='Probability of using prior samples')
+parser.add_argument('--replay_buffer_prob', default=0.0, type=float, help='Probability of using replay buffer samples')
 parser.add_argument('--beta_start', default=1.0, type=float, help='Initial Inverse temperature for reward (Also used if anneal=False)')
 parser.add_argument('--beta_end', default=10.0, type=float, help='Final Inverse temperature for reward')
 parser.add_argument('--anneal', default=False, type=strtobool, help='Whether to anneal beta (From beta_start to beta_end)')
@@ -78,27 +82,32 @@ elif args.exp == "cifar":
 if args.tb:
     print("Training with TB")
 
+replay_buffer = None    
+if not args.replay_buffer == 'none':
+    replay_buffer = ReplayBuffer(rb_size=10000, rb_sample_strategy=args.replay_buffer)
+
 rtb_model = rtb.RTBModel(
-                     device = device, 
-                     reward_model = reward_model,
-                     prior_model = prior_model,
-                     in_shape = in_shape, 
-                     reward_args = reward_args, 
-                     id = id,
-                     model_save_path = args.save_path,
-                     langevin = args.langevin,
-                     inference_type = args.inference,
-                     tb = args.tb,
-                     load_ckpt = args.load_ckpt,
-                     load_ckpt_path = args.load_path,
-                     entity = args.entity,
-                     diffusion_steps = args.diffusion_steps, 
-                     beta_start = args.beta_start, 
-                     beta_end = args.beta_end,
-                     loss_batch_size = args.loss_batch_size)
+            device = device, 
+            reward_model = reward_model,
+            prior_model = prior_model,
+            in_shape = in_shape, 
+            reward_args = reward_args, 
+            id = id,
+            model_save_path = args.save_path,
+            langevin = args.langevin,
+            inference_type = args.inference,
+            tb = args.tb,
+            load_ckpt = args.load_ckpt,
+            load_ckpt_path = args.load_path,
+            entity = args.entity,
+            diffusion_steps = args.diffusion_steps, 
+            beta_start = args.beta_start, 
+            beta_end = args.beta_end,
+            loss_batch_size = args.loss_batch_size,
+            replay_buffer = replay_buffer)
 
 
 if args.langevin:
     rtb_model.pretrain_trainable_reward(n_iters = args.n_iters, batch_size = args.batch_size, learning_rate = args.lr, wandb_track = args.wandb_track)
 
-rtb_model.finetune(shape=(args.batch_size, *in_shape), n_iters = args.n_iters, wandb_track=args.wandb_track, learning_rate=args.lr, prior_sample=args.prior_sample, anneal=args.anneal, anneal_steps=args.anneal_steps)
+rtb_model.finetune(shape=(args.batch_size, *in_shape), n_iters = args.n_iters, wandb_track=args.wandb_track, learning_rate=args.lr, prior_sample_prob=args.prior_sample_prob, replay_buffer_prob=args.replay_buffer_prob, anneal=args.anneal, anneal_steps=args.anneal_steps)

@@ -3,7 +3,7 @@ import numpy as np
 import ImageReward as RM 
 from cifar10_models.vgg import vgg13_bn
 
-from aesthetic_reward.mlp_model import MLP
+#from aesthetic_reward.mlp_model import MLP
 import clip 
 
 class ImageRewardPrompt():
