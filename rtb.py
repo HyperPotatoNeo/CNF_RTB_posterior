@@ -79,6 +79,7 @@ class RTBModel(nn.Module):
             self.num_classes = 10
             self.trainable_reward = reward_models.TrainableClassifierReward(in_shape = self.in_shape, 
                                                                   device = self.device, num_classes = 10)
+            self.cls_optimizer = torch.optim.Adam(self.trainable_reward.parameters(), lr=5e-5)
         else:
             self.trainable_reward = None 
 
@@ -124,6 +125,29 @@ class RTBModel(nn.Module):
         print("Epoch number: ", it)
         return model, optimizer, it
 
+    def classifier_reward(self, x):
+        if self.num_classes == 1:
+            log_r_target = self.log_reward(x)
+            log_r_pred = self.trainable_reward(x)
+            loss = ((log_r_pred - log_r_target)**2).mean() 
+        else:
+            im = self.prior_model(x)
+            target_log_probs = self.reward_model.get_class_logits(im, *self.reward_args)
+            pred_log_probs = torch.nn.functional.log_softmax(self.trainable_reward(x))
+            loss =  torch.nn.CrossEntropyLoss()(pred_log_probs, target_log_probs.argmax(dim=-1)).mean()
+        return loss
+
+    def update_trainable_reward(self, x):
+        if not self.langevin:
+            print("Trainable reward not initialized.")
+            return
+
+        self.cls_optimizer.zero_grad()
+        loss = self.classifier_reward(x)
+        loss.backward()
+        self.cls_optimizer.step()
+        return
+
     def pretrain_trainable_reward(self, batch_size, n_iters = 100, learning_rate = 5e-5, wandb_track = False):
         if not self.langevin:
             print("Trainable reward not initialized.")
@@ -131,7 +155,7 @@ class RTBModel(nn.Module):
 
         B = batch_size
         D = self.in_shape
-        optimizer = torch.optim.Adam(self.trainable_reward.parameters(), lr=learning_rate)
+
         run_name = self.id + '_pretrain_reward_lr_' + str(learning_rate)
 
         if wandb_track:
@@ -143,14 +167,13 @@ class RTBModel(nn.Module):
             )
             hyperparams = {
                 "learning_rate": learning_rate,
-                "n_iters": n_iters,
                 "reward_args": self.reward_args,
                 "training reward": self.langevin
             }
             wandb.config.update(hyperparams)
 
         for i in range(n_iters):
-            optimizer.zero_grad()
+            self.cls_optimizer.zero_grad()
 
             x = torch.randn(B, *D, device=self.device)
 
@@ -165,7 +188,7 @@ class RTBModel(nn.Module):
                 pred_log_probs = torch.nn.functional.log_softmax(self.trainable_reward(x))
                 loss =  torch.nn.CrossEntropyLoss()(pred_log_probs, target_log_probs.argmax(dim=-1)).mean()
             loss.backward()
-            optimizer.step()
+            self.cls_optimizer.step()
 
             if wandb_track:
                 wandb.log({"loss": loss.item(), "iter": i})
@@ -321,6 +344,11 @@ class RTBModel(nn.Module):
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=clip)
             optimizer.step() 
             
+            # trainable reward classifier
+            if self.langevin:
+                x_1, logr_x_prime = self.replay_buffer.sample(shape[0])
+                self.update_trainable_reward(x_1)
+
             if wandb_track: 
                 if not it%100 == 0:
                     wandb.log({"loss": loss.item(), "logZ": self.logZ.detach().cpu().numpy(), "log_r": logr.item(), "epoch": it})
@@ -340,11 +368,30 @@ class RTBModel(nn.Module):
                         x = logs['x_mean_posterior']
                         img = self.prior_model(x)
                         post_reward = self.reward_model(img, *self.reward_args)
-                        wandb.log({"loss": loss.item(), "logZ": self.logZ.detach().cpu().numpy(), "log_r": logr.item(), "epoch": it, 
+                        
+                        if self.langevin:
+                            trained_reward = self.trainable_reward(x).log_softmax(dim=-1)
+                            wandb.log({"prior_samples": [wandb.Image(img[k], caption = "logR(x1) = {}, TrainlogR(z) = {}".format(prior_reward[k], trained_reward[k])) for k in range(len(img))]})
+                        else:
+                            wandb.log({"loss": loss.item(), "logZ": self.logZ.detach().cpu().numpy(), "log_r": logr.item(), "epoch": it, 
                                    "posterior_samples": [wandb.Image(img[k], caption=post_reward[k]) for k in range(len(img))]})
 
                         # save model and optimizer state
                         self.save_checkpoint(self.model, optimizer, it, run_name)
+    
+    def get_langevin_correction(self, x):
+        # add gradient wrt x of trainable reward to model
+        if self.langevin:
+            with torch.set_grad_enabled(True):
+                x.requires_grad = True
+                log_rx = self.trainable_reward(x)
+                grad_log_rx = torch.autograd.grad(log_rx.sum(), x, create_graph=True)[0]
+                
+            lp_correction = grad_log_rx#.detach()
+        else:
+            lp_correction = torch.zeros_like(x)
+        return lp_correction.detach()
+
     def forward(
             self,
             shape,
@@ -412,7 +459,9 @@ class RTBModel(nn.Module):
             
             g = self.sde.diffusion(t, x)
 
-            posterior_drift = -self.sde.drift(t, x) - (g ** 2) * self.model(t, x) / self.sde.sigma(t).view(-1, *[1]*len(D))
+            lp_correction = self.get_langevin_correction(x)
+            posterior_drift = -self.sde.drift(t, x) - (g ** 2) * (self.model(t, x) + lp_correction) / self.sde.sigma(t).view(-1, *[1]*len(D))
+            
             f_posterior = posterior_drift
             # compute parameters for denoising step (wrt posterior)
             x_mean_posterior = x + f_posterior * dt# * (-1.0 if backward else 1.0)
@@ -535,7 +584,9 @@ class RTBModel(nn.Module):
                 continue # continue instead of break because it works for forward and backward
             
             std = self.sde.diffusion(t, x, np.abs(dt))
-            posterior_drift = self.sde.drift(t, x, np.abs(dt)) + self.model(t, x) #/ self.sde.sigma(t).view(-1, *[1]*len(D))
+            
+            lp_correction = self.get_langevin_correction(x)
+            posterior_drift = self.sde.drift(t, x, np.abs(dt)) + self.model(t, x) + lp_correction #/ self.sde.sigma(t).view(-1, *[1]*len(D))
             f_posterior = posterior_drift
             # compute parameters for denoising step (wrt posterior)
             x_mean_posterior = x + f_posterior 
@@ -664,7 +715,8 @@ class RTBModel(nn.Module):
 
             g = self.sde.diffusion(t_, xs).to(self.device)
 
-            f_posterior = -self.sde.drift(t_, xs) - g ** 2 * self.model(t_[:,0,0,0], xs) / self.sde.sigma(t_).view(-1, *[1]*len(D))
+            lp_correction = self.get_langevin_correction(xs)
+            f_posterior = -self.sde.drift(t_, xs) - g ** 2 * (self.model(t_[:,0,0,0], xs) + lp_correction) / self.sde.sigma(t_).view(-1, *[1]*len(D))
             
             # compute parameters for denoising step (wrt posterior)
             x_mean_posterior = xs + f_posterior * dts
@@ -771,7 +823,8 @@ class RTBModel(nn.Module):
 
             std = self.sde.diffusion(t_, xs, -dts).to(self.device)
 
-            f_posterior = self.sde.drift(t_, xs, -dts) + self.model(t_[:,0,0,0], xs) #/ self.sde.sigma(t_).view(-1, *[1]*len(D))
+            lp_correction = self.get_langevin_correction(xs)
+            f_posterior = self.sde.drift(t_, xs, -dts) + self.model(t_[:,0,0,0], xs) + lp_correction #/ self.sde.sigma(t_).view(-1, *[1]*len(D))
             
             # compute parameters for denoising step (wrt posterior)
             x_mean_posterior = xs + f_posterior 

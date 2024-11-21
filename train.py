@@ -42,6 +42,8 @@ parser.add_argument('--compute_fid', default=False, type=strtobool, help="Whethe
 
 parser.add_argument('--inference', default='vpsde', type=str, help='Inference method for prior', choices=['vpsde', 'ddpm'])
 
+#parser.add_argument('--')
+
 args = parser.parse_args()
 
 if args.reward_prompt == '':
@@ -108,6 +110,6 @@ rtb_model = rtb.RTBModel(
 
 
 if args.langevin:
-    rtb_model.pretrain_trainable_reward(n_iters = args.n_iters, batch_size = args.batch_size, learning_rate = args.lr, wandb_track = args.wandb_track)
+    rtb_model.pretrain_trainable_reward(n_iters = 20, batch_size = args.batch_size, learning_rate = args.lr, wandb_track = False) #args.wandb_track)
 
 rtb_model.finetune(shape=(args.batch_size, *in_shape), n_iters = args.n_iters, wandb_track=args.wandb_track, learning_rate=args.lr, prior_sample_prob=args.prior_sample_prob, replay_buffer_prob=args.replay_buffer_prob, anneal=args.anneal, anneal_steps=args.anneal_steps)
