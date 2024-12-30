@@ -6,6 +6,7 @@ from torchcfm.models.unet.unet import UNetModelWrapper
 import wandb
 from tqdm import tqdm
 import random
+from prior_models import MLP
 
 from sde import VPSDE, DDPM
 import reward_models
@@ -30,7 +31,8 @@ class RTBModel(nn.Module):
                  beta_start=1.0, 
                  beta_end=10.0,
                  loss_batch_size=64,
-                 replay_buffer=None):
+                 replay_buffer=None,
+                 posterior_architecture='unet'):
         super().__init__()
         self.device = device
         
@@ -59,6 +61,7 @@ class RTBModel(nn.Module):
 
         # Posterior noise model
         self.logZ = torch.nn.Parameter(torch.tensor(0.).to(self.device))
+        #if posterior_architecture == 'unet':
         self.model = UNetModelWrapper(
             dim = self.in_shape,
             num_res_blocks = 2,
@@ -69,6 +72,8 @@ class RTBModel(nn.Module):
             attention_resolutions = "16",
             dropout = 0.0,
         ).to(self.device)
+        #elif posterior_architecture == 'mlp':
+        #    self.model = MLP(dim = self.in_shape[0]).to(self.device)
         
         # Prior flow model pipeline
         self.prior_model = prior_model 
