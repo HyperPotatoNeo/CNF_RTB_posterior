@@ -1,0 +1,136 @@
+data:
+  csv_path: /mnt/shared_storage/processed_pdbs/metadata.csv
+  cluster_path: /mnt/shared_storage/processed_pdbs/clusters-by-entity-30.txt
+  filtering:
+    max_len: 512
+    min_len: 60
+    subset: null
+    allowed_oligomer:
+    - monomeric
+    max_helix_percent: 1.0
+    max_loop_percent: 0.5
+    min_beta_percent: -1.0
+    rog_quantile: 0.96
+  min_t: 0.01
+  samples_per_eval_length: 4
+  num_eval_lengths: 10
+  num_t: 100
+  max_same_res: 50
+  num_csv_processors: 5
+  cache_full_dataset: false
+flow_matcher:
+  flow_trans: true
+  flow_rot: true
+  ot_fn: exact
+  reg: 0.05
+  ot_plan: false
+  stochastic_paths: false
+  r3:
+    min_b: 0.01
+    min_sigma: 0.01
+    max_b: 20.0
+    coordinate_scaling: 0.1
+    g: 0.1
+  so3:
+    min_sigma: 0.01
+    max_sigma: 1.5
+    axis_angle: true
+    inference_scaling: 10.0
+    g: 0.1
+model:
+  model_name: ff2
+  esm2_model_key: esm2_650M
+  scaffold_training: false
+  binder_training: false
+  binder_percent_fix_structure: 1.0
+  bb_encoder:
+    num_blocks: 2
+    coordinate_scaling: ${flow_matcher.r3.coordinate_scaling}
+  bb_decoder:
+    num_blocks: 2
+    coordinate_scaling: ${flow_matcher.r3.coordinate_scaling}
+  seq_emb_to_block:
+    single_dim: 128
+    pair_dim: 128
+  representation_combiner:
+    single_dim: 128
+    pair_dim: 64
+    layer_norm: true
+  modalities_transformer:
+    trunk_type: transformer
+    num_blocks: 2
+    sequence_head_width: 32
+    pairwise_head_width: 32
+    chunk_size: null
+  p_mask_sequence: 0.5
+  embed:
+    embed_self_conditioning: true
+    use_alphafold_position_embedding: false
+    relpos_k: null
+experiment:
+  name: baseline
+  run_id: null
+  use_ddp: false
+  log_freq: 100
+  batch_size: 256
+  eval_batch_size: ${data.samples_per_eval_length}
+  num_loader_workers: 12
+  torch_num_threads: 8
+  num_epoch: 500
+  learning_rate: 0.0001
+  max_squared_res: 500000
+  prefetch_factor: 100
+  use_gpu: true
+  num_gpus: 1
+  sample_mode: cluster_time_batch
+  ckpt_freq: 5000
+  eval_freq: 5000
+  early_ckpt: true
+  warm_start: null
+  use_warm_start_conf: false
+  ckpt_dir: ./proteins/ckpt/
+  full_ckpt_dir: ${experiment.ckpt_dir}/${experiment.name}/
+  trans_loss_weight: 1.0
+  rot_loss_weight: 0.5
+  rot_loss_t_threshold: 0.0
+  separate_rot_loss: true
+  trans_x0_threshold: 0.0
+  coordinate_scaling: ${flow_matcher.r3.coordinate_scaling}
+  bb_atom_loss_weight: 1.0
+  bb_atom_loss_t_filter: 0.25
+  dist_mat_loss_weight: 1.0
+  dist_mat_loss_t_filter: 0.25
+  aux_loss_weight: 0.25
+  eval_dir: ./proteins/
+  noise_scale: 1.0
+  num_parameters: null
+wandb:
+  use_wandb: true
+  entity: null
+  project: se3-fm
+  dir: ./proteins/wandb/
+  tags: null
+  group: null
+  offline: false
+  job_type: null
+start_time_string: default
+conda_env: se3
+inference:
+  name: null
+  gpu_id: 0
+  seed: 123
+  full_ckpt_dir: ./proteins/ckpt/baseline/
+  pt_hub_dir: ~/scratch/hub/checkpoints
+  pmpnn_dir: ../FoldFlow/ProteinMPNN/
+  output_dir: ./proteins/results
+  weights_path: ./models/proteins/ff2_base.pth
+  flow:
+    num_t: 50
+    noise_scale: 0.1
+    min_t: 0.01
+  samples:
+    samples_per_length: 50
+    seq_per_sample: 8
+    min_length: 100
+    max_length: 300
+    length_step: 50
