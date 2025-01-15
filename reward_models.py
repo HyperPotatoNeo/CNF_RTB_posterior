@@ -1,4 +1,6 @@
-import torch 
+import types
+import torch
+import torch.nn.functional as F 
 import numpy as np
 import ImageReward as RM 
 from cifar10_models.vgg import vgg13_bn
@@ -6,18 +8,54 @@ from cifar10_models.vgg import vgg13_bn
 #from aesthetic_reward.mlp_model import MLP
 import clip 
 
+def score_differentiable(self, prompt, img):
+    # text encode
+    text_input = self.blip.tokenizer(prompt, padding='max_length', truncation=True, max_length=35, return_tensors="pt").to(self.device)
+        
+    image = F.interpolate(
+        img, size=224, mode='bilinear', align_corners=False)
+    means = [0.48145466, 0.4578275, 0.40821073]
+    stds  = [0.26862954, 0.26130258, 0.27577711]
+
+    mean_t = torch.tensor(means).view(1, -1, 1, 1).cuda()  # shape: (1, 3, 1, 1)
+    std_t  = torch.tensor(stds).view(1, -1, 1, 1).cuda()   # shape: (1, 3, 1, 1)
+
+    # Normalize: (x - mean) / std
+    image = (image - mean_t) / std_t
+    image_embeds = self.blip.visual_encoder(image)
+    
+    # text encode cross attention with image
+    image_atts = torch.ones(image_embeds.size()[:-1],dtype=torch.long).to(self.device)
+    text_output = self.blip.text_encoder(text_input.input_ids,
+                                            attention_mask = text_input.attention_mask,
+                                            encoder_hidden_states = image_embeds,
+                                            encoder_attention_mask = image_atts,
+                                            return_dict = True,
+                                        )
+    
+    txt_features = text_output.last_hidden_state[:,0,:].float() # (feature_dim)
+    rewards = self.mlp(txt_features)
+    rewards = (rewards - self.mean) / self.std
+    
+    return rewards.squeeze()#.detach().cpu().numpy().item()
+
 class ImageRewardPrompt():
-    def __init__(self, device, prompt):
+    def __init__(self, device, prompt, differentiable=False):
         self.device = device
         self.prompt = prompt 
         self.reward_model = RM.load("ImageReward-v1.0").to("cuda")
+        self.differentiable = differentiable
+        if differentiable:
+            self.reward_model.score_differentiable = types.MethodType(score_differentiable, self.reward_model)
 
     def __call__(self, img, *args):
-
-        with torch.no_grad():
-            prompt = self.prompt 
-            logr = torch.tensor(self.reward_model.score(prompt, img)).to(self.device)
-
+        if not self.differentiable:
+            with torch.no_grad():
+                prompt = self.prompt 
+                logr = torch.tensor(self.reward_model.score(prompt, img)).to(self.device)
+        else:
+            prompt = self.prompt
+            logr = self.reward_model.score_differentiable(prompt, img)
         return logr 
 
 

@@ -1,13 +1,100 @@
-import os 
-import torch 
+import os
+import types 
+import torch
 from diffusers import StableDiffusion3Pipeline
 from diffusers.schedulers import EulerAncestralDiscreteScheduler
 from huggingface_hub import login
+import numpy as np
+# GAN FFHQ
+import GAN.stylegan3.dnnlib as dnnlib
+import GAN.stylegan3.legacy as legacy
+from GAN.stylegan3.torch_utils import misc 
+import PIL.Image
+from typing import List, Optional, Tuple, Union
 
 from torchcfm.models.unet.unet import UNetModelWrapper
-#from torchdiffeq import odeint
-#from torchdyn.core import NeuralODE
+from torchdiffeq import odeint
+from torchdyn.core import NeuralODE
 
+class MLP(torch.nn.Module):
+    def __init__(self, dim, w=2048):
+        super().__init__()
+        self.dim = dim
+        self.w = w
+        self.time_dim = 64  # Dimension of the time embedding
+
+        self.net = torch.nn.Sequential(
+            torch.nn.Linear(dim + self.time_dim, w),
+            torch.nn.SELU(),
+            torch.nn.Linear(w, w),
+            torch.nn.SELU(),
+            torch.nn.Linear(w, w),
+            torch.nn.SELU(),
+            torch.nn.Linear(w, dim),
+        )
+
+    def forward(self, t, x):
+        """
+        Forward pass of the MLP with time conditioning.
+
+        :param x: Input tensor of shape [batch_size, dim]
+        :param t: Time tensor of shape [batch_size]
+        :return: Output tensor of shape [batch_size, out_dim]
+        """
+        time_emb = self.get_timestep_embedding(t, self.time_dim)
+        x = torch.cat([x, time_emb], dim=1)  # Concatenate along the feature dimension
+        return self.net(x)
+
+    def get_timestep_embedding(self, timesteps, embedding_dim):
+        """
+        Generate sinusoidal embeddings for the given time steps.
+
+        :param timesteps: 1-D tensor of time steps [batch_size]
+        :param embedding_dim: Dimension of the time embeddings
+        :return: Time embeddings of shape [batch_size, embedding_dim]
+        """
+        half_dim = embedding_dim // 2
+        emb_scale = torch.log(torch.tensor(10000.0)).cuda() / (half_dim - 1)
+        emb = torch.exp(-emb_scale * torch.arange(half_dim, device=timesteps.device, dtype=torch.float32))
+        emb = timesteps.float().unsqueeze(1) * emb.unsqueeze(0)
+        emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=1)
+        if embedding_dim % 2 == 1:
+            emb = torch.nn.functional.pad(emb, (0, 1))
+        return emb
+
+class GAN_FFHQ_Prompt():
+    def __init__(self, device):
+        self.device = device
+        network_pkl = 'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan3/versions/1/files/stylegan3-t-ffhqu-256x256.pkl'
+        with dnnlib.util.open_url(network_pkl) as f:
+            self.G = legacy.load_network_pkl(f)['G_ema'].to(device) # type: ignore
+
+    def make_transform(translate: Tuple[float,float], angle: float):
+        m = np.eye(3)
+        s = np.sin(angle/360.0*np.pi*2)
+        c = np.cos(angle/360.0*np.pi*2)
+        m[0][0] = c
+        m[0][1] = s
+        m[0][2] = translate[0]
+        m[1][0] = -s
+        m[1][1] = c
+        m[1][2] = translate[1]
+        return m
+    
+    def __call__(self, x):
+        x = x.view(-1, 512)
+        label = torch.zeros([x.shape[0], self.G.c_dim], device=self.device)
+        img = self.G(x, label)
+        img = (img.permute(0, 2, 3, 1) * 127.5 + 128).clamp(0, 255).to(torch.uint8)
+        pil_images = [PIL.Image.fromarray(img[i].detach().cpu().numpy()) for i in range(img.shape[0])]
+        return pil_images
+    
+    def differentiable_call(self, x):
+        x = x.view(-1, 512)
+        label = torch.zeros([x.shape[0], self.G.c_dim], device=self.device)
+        img = self.G(x, label, force_fp32=True)
+        img = img * 127.5 + 128#.clamp(0, 255).to(torch.uint8)
+        return img
 
 class StableDiffusion3():
     def __init__(self, prompt, num_inference_steps, device):
@@ -97,4 +184,12 @@ class CIFARModel():
         traj = traj[-1, :]
         img = (traj * 127.5 + 128).clip(0, 255).to(torch.uint8)
 
-        return img 
+        return img
+    
+    def differentiable_call(self, x):
+        t_span = torch.linspace(0, 1, self.num_inference_steps + 1, device=self.device)
+        traj = self.neural_ode.trajectory(x, t_span=t_span)
+        traj = traj[-1, :]
+        img = (traj * 127.5 + 128)#.clip(0, 255).to(torch.uint8)
+
+        return img
