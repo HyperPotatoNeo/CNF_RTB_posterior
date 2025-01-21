@@ -1,4 +1,5 @@
-import os 
+import copy
+import os
 import numpy as np
 import torch
 import torch.nn as nn
@@ -7,6 +8,8 @@ import wandb
 from tqdm import tqdm
 import random
 from prior_models import MLP
+import torchvision.utils as vutils
+import torchvision.transforms as tf
 
 from sde import VPSDE, DDPM
 import reward_models
@@ -355,7 +358,7 @@ class RTBModel(nn.Module):
                 self.update_trainable_reward(x_1)
 
             if wandb_track: 
-                if not it%100 == 0:
+                if not it % 100 == 0:
                     wandb.log({"loss": loss.item(), "logZ": self.logZ.detach().cpu().numpy(), "log_r": logr.item(), "epoch": it})
                 else:
                     with torch.no_grad():
@@ -438,6 +441,8 @@ class RTBModel(nn.Module):
         normal_dist = torch.distributions.Normal(torch.zeros((B,) + tuple(D), device=self.device),
                                                  torch.ones((B,) + tuple(D), device=self.device))
 
+        xT = copy.copy(x)
+
         logpf_posterior = 0*normal_dist.log_prob(x).sum(tuple(range(1, len(x.shape)))).to(self.device)
         logpb = 0*normal_dist.log_prob(x).sum(tuple(range(1, len(x.shape)))).to(self.device)#torch.zeros_like(logpf_posterior)
         dt = -1/(steps+1)
@@ -513,10 +518,11 @@ class RTBModel(nn.Module):
         if backward:
             traj = list(reversed(traj))
         logs = {
-            'x_mean_posterior': x,#,x_mean_posterior,
+            'x_mean_posterior': x,  #,x_mean_posterior,
             'logpf_prior': logpb,
             'logpf_posterior': logpf_posterior,
-            'traj': traj if save_traj else None
+            'traj': traj if save_traj else None,
+            'x0': xT
         }
 
         return logs
@@ -553,7 +559,7 @@ class RTBModel(nn.Module):
 
         if backward:
             x = x_1
-            timesteps = np.flip(timesteps)
+            # timesteps = np.flip(timesteps)
             t = torch.zeros(B).to(self.device) + self.sde.epsilon
         else:
             x = self.sde.prior(D).sample([B]).to(self.device)
@@ -857,3 +863,201 @@ class RTBModel(nn.Module):
                 break
 
         return True
+
+    def distill(
+            self,
+            shape,
+            distilled_ckpt_path,
+            teacher_ckpt_filename,
+            teacher_ckpt_path,
+            n_iters=10000,
+            learning_rate=1e-4,
+            save_interval=500,
+            wandb_track=False
+    ):
+        """
+        Distills a fine-tuned diffusion model (self.model) into a single-step generator,
+        but uses the exact same architecture class as self.model (e.g., a UNet).
+
+        1) Loads teacher (fine-tuned) weights from teacher_ckpt_path into self.model.
+        2) Instantiates a new random UNet (same class as self.model) to become our 'distilled_model'.
+        3) Trains this distilled UNet to replicate teacher samples (RTB style).
+        4) Saves the distilled model every few epochs (save_interval).
+        5) Logs training metrics to wandb if wandb_track=True.
+
+        Args:
+            shape:             (B, *D) shape for training batches
+            distilled_ckpt_path: Path to save distilled checkpoints
+            teacher_ckpt_path:   Path to the fine-tuned teacher weights
+            n_iters:          Number of distillation iterations
+            learning_rate:    Learning rate for the distilled model
+            save_interval:    Interval for saving the distilled model
+            wandb_track:      Whether to track metrics in wandb
+        """
+        import copy
+        print('Started distillation.')
+        # -------------------------------------------------------------------------
+        # 1) LOAD TEACHER (FINE-TUNED) WEIGHTS
+        # -------------------------------------------------------------------------
+        if teacher_ckpt_path is not None and teacher_ckpt_filename is not None:
+            teacher_checkpoint = torch.load(os.path.expanduser(teacher_ckpt_path + teacher_ckpt_filename), map_location=self.device)
+            self.model.load_state_dict(teacher_checkpoint['model_state_dict'])
+            print(f"Loaded teacher (fine-tuned) checkpoint from {teacher_ckpt_path}")
+        else:
+            print("No teacher_ckpt_path provided; using self.model as-is.")
+
+        # -------------------------------------------------------------------------
+        # 2) INSTANTIATE A NEW, RANDOMLY INITIALIZED UNET (SAME CLASS AS self.model)
+        # -------------------------------------------------------------------------
+        # For demonstration, let's assume self.model is a UNetModelWrapper.
+        # We'll create a fresh instance below:
+        self.distilled_model = UNetModelWrapper(
+            dim=self.in_shape,
+            num_res_blocks=2,
+            num_channels=128,
+            channel_mult=[1, 2, 2, 2],
+            num_heads=4,
+            num_head_channels=64,
+            attention_resolutions="16",
+            dropout=0.0,
+        ).to(self.device)  # random initialization
+
+        # Define optimizer
+        distilled_optimizer = torch.optim.Adam(self.distilled_model.parameters(), lr=learning_rate)
+
+        # -------------------------------------------------------------------------
+        # 3) TRAIN THE SINGLE-STEP GENERATOR TO REPLICATE TEACHER SAMPLES
+        # -------------------------------------------------------------------------
+        run_name = f"{self.id}_distillation_{n_iters}_it_{learning_rate}_lr"
+
+        if wandb_track:
+            wandb.init(
+                project='cfm_posterior',
+                entity=self.entity,
+                save_code=True,
+                name=run_name
+            )
+            wandb.config.update({
+                "learning_rate": learning_rate,
+                "n_iters": n_iters,
+                "distill_run_name": run_name,
+                "student_arch": "same_unet_as_teacher",
+                "sde_type": self.sde_type
+            })
+
+        for it in range(n_iters):
+            # (a) Sample random noise for teacher's multi-step generation
+            B = shape[0]
+
+            # (b) Generate teacher sample (multi-step) using VPSDE or DDPM
+            with torch.no_grad():
+                if self.sde_type == 'vpsde':
+                    teacher_logs = self.forward(
+                        shape=(B, *self.in_shape),
+                        steps=self.steps
+                    )
+                elif self.sde_type == 'ddpm':
+                    teacher_logs = self.forward_ddpm(
+                        shape=(B, *self.in_shape),
+                        steps=self.steps
+                    )
+                else:
+                    raise ValueError(f"Unknown sde_type: {self.sde_type}")
+
+                x_teacher = teacher_logs['x_mean_posterior']
+                z = teacher_logs['x0']
+
+            # # ---------------------------------------------------------------------
+            # # (b) Sample random noise for the student (one-step)
+            # # ---------------------------------------------------------------------
+            # z = torch.randn(B, *self.in_shape, device=self.device)
+
+            # (c) Distilled model forward pass in ONE step
+            x_distilled = self.distilled_model(
+                t=torch.zeros(B, device=self.device),
+                x=z
+            )
+
+            # (e) Distillation loss: e.g. MSE between teacher sample & distilled sample
+            mse = torch.nn.functional.mse_loss(x_distilled, x_teacher)
+
+            # # Flatten for pairwise distance (B, C*H*W)
+            # B = x_distilled.size(0)
+            # x_flat = x_distilled.view(B, -1)  # shape: (B, D)
+            # # Compute pairwise L2 distances; shape: (B, B)
+            # distances = torch.cdist(x_flat, x_flat, p=2)
+            #
+            # # Optional: exclude diagonal (distance from a sample to itself = 0)
+            # non_diag_mask = ~torch.eye(B, dtype=bool, device=x_distilled.device)
+            # non_diag_distances = distances[non_diag_mask]
+            # mean_pairwise_dist = non_diag_distances.mean()
+            #
+            # mean_pairwise_dist = distances.mean()
+
+            dvar = x_distilled.var(0).mean()
+            mean_pairwise_dist = torch.relu(-dvar + .9)
+
+            # We want to maximize pairwise diversity, so we subtract it from the total loss
+            diversity_weight = 1.0  # hyperparameter to tune
+            diversity_loss = diversity_weight * mean_pairwise_dist
+
+            # Combine the two losses
+            loss = mse + diversity_loss
+
+
+            distilled_optimizer.zero_grad()
+            loss.backward()
+            distilled_optimizer.step()
+
+            # ---------------------------------------------------------------------
+            # (f) Logging
+            # ---------------------------------------------------------------------
+            if wandb_track:
+                wandb.log({
+                    "distill_loss": loss.item(),
+                    "iter": it,
+                    "regularizer_loss": mean_pairwise_dist,
+                    "dist_variance": dvar,
+                    "mse": mse
+                })
+
+            if it % 100 == 0:
+                print(f"[Distill Iter {it}/{n_iters}] Loss = {loss.item():.6f}")
+
+                # Generate and log final images from both teacher & student
+                with torch.no_grad():
+                    # Teacher images
+                    teacher_img_batch = self.prior_model(x_teacher)
+                    # Student images
+                    student_img_batch = self.prior_model(x_distilled)
+
+                if wandb_track:
+                    # Log side-by-side samples: teacher vs student
+
+                    if wandb_track:
+                        # Take the first 9 images from student_img_batch (or teacher_img_batch)
+                        # and arrange them in a 3x3 grid.
+                        grid_student = vutils.make_grid([tf.ToTensor()(img) for img in student_img_batch[:9]], nrow=3, padding=2, normalize=True)
+                        grid_teacher = vutils.make_grid([tf.ToTensor()(img) for img in teacher_img_batch[:9]], nrow=3, padding=2, normalize=True)
+
+                        # Log that grid image to wandb
+                        wandb.log({
+                            "student_3x3_grid": wandb.Image(grid_student, caption="Distilled Samples"),
+                            "teacher_3x3_grid": wandb.Image(grid_teacher, caption="Diffusion Samples"),
+                            "iter": it
+                        })
+
+            # ---------------------------------------------------------------------
+            # 4) SAVE CHECKPOINT EVERY `save_interval`
+            # ---------------------------------------------------------------------
+            if it % save_interval == 0 and it > 0:
+                os.makedirs(distilled_ckpt_path, exist_ok=True)
+                ckpt_filename = os.path.join(distilled_ckpt_path, f"distilled_checkpoint_{it}.pth")
+                torch.save({
+                    'distilled_model_state_dict': self.distilled_model.state_dict(),
+                    'optimizer_state_dict': distilled_optimizer.state_dict()
+                }, ckpt_filename)
+                print(f"Distilled UNet checkpoint saved at iteration {it} -> {ckpt_filename}")
+
+        print("Distillation complete. Your student model (same class as teacher) is in self.distilled_model.")
+
