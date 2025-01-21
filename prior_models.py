@@ -6,9 +6,10 @@ from diffusers.schedulers import EulerAncestralDiscreteScheduler
 from huggingface_hub import login
 import numpy as np
 # GAN FFHQ
-import GAN.stylegan3.dnnlib as dnnlib
-import GAN.stylegan3.legacy as legacy
-from GAN.stylegan3.torch_utils import misc 
+#import GAN.stylegan3.dnnlib as dnnlib
+#import GAN.stylegan3.legacy as legacy
+#from GAN.stylegan3.torch_utils import misc
+from sngan_cifar10.sngan_cifar10 import Generator, SNGANConfig 
 import PIL.Image
 from typing import List, Optional, Tuple, Union
 
@@ -193,3 +194,21 @@ class CIFARModel():
         img = (traj * 127.5 + 128)#.clip(0, 255).to(torch.uint8)
 
         return img
+    
+class SNGANGenerator():
+    def __init__(self, device, sngan_improve=False):
+        self.device = device
+        args = SNGANConfig()
+        self.prior_model = Generator(args).to(device)
+        if sngan_improve:
+            checkpoint = torch.load("./sngan_cifar10/checkpoint.pth")
+            self.prior_model.load_state_dict(checkpoint['gen_state_dict'])
+        else:
+            checkpoint = torch.load("./sngan_cifar10/sngan_cifar10.pth")
+            self.prior_model.load_state_dict(checkpoint)
+        
+    def __call__(self, x):
+        x = x.view(-1, 128)
+        img = self.prior_model(x)
+        return (img * 127.5 + 128).clip(0, 255).to(torch.uint8)
+        

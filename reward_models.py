@@ -1,9 +1,11 @@
 import types
 import torch
-import torch.nn.functional as F 
+import torch.nn.functional as F
+import torch.nn as nn 
 import numpy as np
 import ImageReward as RM 
 from cifar10_models.vgg import vgg13_bn
+from sngan_cifar10.sngan_cifar10 import Discriminator, SNGANConfig
 
 #from aesthetic_reward.mlp_model import MLP
 import clip 
@@ -59,6 +61,32 @@ class ImageRewardPrompt():
         return logr 
 
 
+class MLP(nn.Module):
+    def __init__(self, input_size, xcol='emb', ycol='avg_rating'):
+        super().__init__()
+        self.input_size = input_size
+        self.xcol = xcol
+        self.ycol = ycol
+        self.layers = nn.Sequential(
+            nn.Linear(self.input_size, 1024),
+            #nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(1024, 128),
+            #nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(128, 64),
+            #nn.ReLU(),
+            nn.Dropout(0.1),
+
+            nn.Linear(64, 16),
+            #nn.ReLU(),
+
+            nn.Linear(16, 1)
+        )
+        
+    def forward(self, x):
+        return self.layers(x)
+
 # adapted from https://github.com/christophschuhmann/improved-aesthetic-predictor
 class AestheticPredictor():
     def __init__(self, device):
@@ -80,12 +108,14 @@ class AestheticPredictor():
 
     def __call__(self, img, *args):
         with torch.no_grad():
-            img = self.clip_preprocess(img)
+            #img = self.clip_preprocess(img)
+            preprocessed = [self.clip_preprocess(image) for image in img]
+            img = torch.stack(preprocessed).to(self.device)
             im_feat = self.clip_model.encode_image(img)
-            im_emb_arr = self.normalized(im_feat.cpu().detach().numpy() )
+            im_emb_arr = self.normalized(im_feat.cpu().detach().numpy())
 
             prediction = self.model(torch.from_numpy(im_emb_arr).to(self.device).type(torch.cuda.FloatTensor))
-        return prediction 
+        return prediction[:,0]
 
 
 class CIFARClassifier():
@@ -108,6 +138,19 @@ class CIFARClassifier():
         log_prob = torch.nn.functional.log_softmax(logits, dim=1)
         return log_prob
     
+
+class SNGANDiscriminatorReward():
+    def __init__(self, device):
+        self.device = device
+        checkpoint = torch.load("./sngan_cifar10/checkpoint.pth")
+        args = SNGANConfig()
+        self.discriminator = Discriminator(args).to(device)
+        self.discriminator.load_state_dict(checkpoint['dis_state_dict'])
+        
+    def __call__(self, img, *args):
+        img_normalized = img.float()/127.5 - 1
+        discriminator_score = self.discriminator(img_normalized)
+        return discriminator_score[:,0]
 
 # A trainable reward model, takes as input (in_shape), and 
 # outputs scalar reward

@@ -2,12 +2,13 @@ import os
 import numpy as np
 import torch
 import torch.nn as nn
+from torchvision import datasets, transforms
 from torchcfm.models.unet.unet import UNetModelWrapper
 import wandb
 from tqdm import tqdm
 import random
 from prior_models import MLP
-
+from cleanfid import fid
 from sde import VPSDE, DDPM
 import reward_models
 import utils
@@ -216,6 +217,8 @@ class RTBModel(nn.Module):
     def get_beta(self, it, anneal, anneal_steps):
         if anneal and it < anneal_steps:
             beta = ((anneal_steps - it)/anneal_steps) * self.beta_start + (it / anneal_steps) * self.beta_end
+        elif anneal:
+            beta = self.beta_end
         else:
             beta = self.beta_start 
 
@@ -297,7 +300,7 @@ class RTBModel(nn.Module):
 
         return rtb_loss.detach().mean(), logr_x_prime.mean()
     
-    def finetune(self, shape, n_iters=100000, learning_rate=5e-5, clip=0.1, wandb_track=False, prior_sample_prob=0.0, replay_buffer_prob=0.0, anneal=False, anneal_steps=15000):
+    def finetune(self, shape, n_iters=100000, learning_rate=5e-5, clip=0.1, wandb_track=False, prior_sample_prob=0.0, replay_buffer_prob=0.0, anneal=False, anneal_steps=15000, exp='sd3_align', compute_fid=False, class_label=0):
         B, *D = shape
         param_list = [{'params': self.model.parameters()}]
         optimizer = torch.optim.Adam(param_list, lr=learning_rate)
@@ -373,13 +376,30 @@ class RTBModel(nn.Module):
                         x = logs['x_mean_posterior']
                         img = self.prior_model(x)
                         post_reward = self.reward_model(img, *self.reward_args)
-                        
                         if self.langevin:
-                            trained_reward = self.trainable_reward(x).log_softmax(dim=-1)
-                            wandb.log({"prior_samples": [wandb.Image(img[k], caption = "logR(x1) = {}, TrainlogR(z) = {}".format(prior_reward[k], trained_reward[k])) for k in range(len(img))]})
+                            log_dict = {"prior_samples": [wandb.Image(img[k], caption = "logR(x1) = {}, TrainlogR(z) = {}".format(prior_reward[k], trained_reward[k])) for k in range(len(img))]}
                         else:
-                            wandb.log({"loss": loss.item(), "logZ": self.logZ.detach().cpu().numpy(), "log_r": logr.item(), "epoch": it, 
-                                   "posterior_samples": [wandb.Image(img[k], caption=post_reward[k]) for k in range(len(img))]})
+                            log_dict = {"loss": loss.item(), "logZ": self.logZ.detach().cpu().numpy(), "log_r": logr.item(), "epoch": it, 
+                                   "posterior_samples": [wandb.Image(img[k], caption=post_reward[k]) for k in range(len(img))]}
+                        
+                        if it%1000 == 0 and 'cifar' in exp and compute_fid:# and it>0:
+                            print('COMPUTING FID:')
+                            generated_images_dir = 'fid/' + exp + '_cifar10_class_' + str(class_label)
+                            true_images_dir = 'fid/cifar10_class_' + str(class_label)
+                            for k in range(60):
+                                with torch.no_grad():
+                                    logs = self.forward(
+                                        shape=(100, *D),
+                                        steps=self.steps
+                                        )
+                                    x = logs['x_mean_posterior']
+                                    img_fid = self.prior_model(x)
+                                    for i, img_tensor in enumerate(img_fid):
+                                        img_pil = transforms.ToPILImage()(img_tensor)
+                                        img_pil.save(os.path.join(generated_images_dir, f'{k*100 + i}.png'))
+                            fid_score = fid.compute_fid(generated_images_dir, true_images_dir)
+                            log_dict['fid'] = fid_score
+                        wandb.log(log_dict)
 
                         # save model and optimizer state
                         self.save_checkpoint(self.model, optimizer, it, run_name)
