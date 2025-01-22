@@ -4,6 +4,9 @@ from distutils.util import strtobool
 import os
 from torchvision import datasets, transforms
 import rtb 
+import non_latent_rtb
+import memoryless_dpok
+import memoryless_am
 #import tb 
 import reward_models 
 import prior_models
@@ -42,6 +45,9 @@ parser.add_argument('--langevin', default=False, type=strtobool, help="Whether t
 parser.add_argument('--compute_fid', default=False, type=strtobool, help="Whether to compute FID score during training (every 1k steps)")
 
 parser.add_argument('--inference', default='vpsde', type=str, help='Inference method for prior', choices=['vpsde', 'ddpm'])
+
+# am: implementation not finished yet. dpok, nl_rtb: code review needed
+parser.add_argument('--method', default= 'rtb', type=str, help='Method for training', choices=['rtb', 'dpok', 'nl_rtb', 'am'])
 
 #parser.add_argument('--')
 
@@ -130,10 +136,16 @@ replay_buffer = None
 if not args.replay_buffer == 'none':
     replay_buffer = ReplayBuffer(rb_size=10000, rb_sample_strategy=args.replay_buffer)
 
-rtb_model = rtb.RTBModel(
+
+# non-latent RTB is only implemented for CIFAR now.
+if args.method == 'nl_rtb' and 'cifar' in args.exp:
+    model = prior_models.CIFARModel(device = device,
+                                          num_inference_steps=20).get_prior_model().train()   
+    rtb_model = non_latent_rtb.RTBModel(
             device = device, 
             reward_model = reward_model,
             prior_model = prior_model,
+            model = model,
             in_shape = in_shape, 
             reward_args = reward_args, 
             id = id,
@@ -150,6 +162,79 @@ rtb_model = rtb.RTBModel(
             loss_batch_size = args.loss_batch_size,
             replay_buffer = replay_buffer,
             posterior_architecture = posterior_architecture)
+
+elif args.method == 'dpok' and 'cifar' in args.exp:
+    model = prior_models.CIFARModel(device = device,
+                                          num_inference_steps=20).get_prior_model().train()   
+    rtb_model = memoryless_dpok.RTBModel(
+                device = device, 
+                reward_model = reward_model,
+                prior_model = prior_model,
+                model = model,
+                in_shape = in_shape, 
+                reward_args = reward_args, 
+                id = id,
+                model_save_path = args.save_path,
+                langevin = args.langevin,
+                inference_type = args.inference,
+                tb = args.tb,
+                load_ckpt = args.load_ckpt,
+                load_ckpt_path = args.load_path,
+                entity = args.entity,
+                diffusion_steps = args.diffusion_steps, 
+                beta_start = args.beta_start, 
+                beta_end = args.beta_end,
+                loss_batch_size = args.loss_batch_size,
+                replay_buffer = replay_buffer,
+                posterior_architecture = posterior_architecture)
+elif args.method == 'am' and 'cifar' in args.exp:
+    model = prior_models.CIFARModel(device = device,
+                                          num_inference_steps=20).get_prior_model().train()   
+    rtb_model = memoryless_am.RTBModel(
+                device = device, 
+                reward_model = reward_model,
+                prior_model = prior_model,
+                model = model,
+                in_shape = in_shape, 
+                reward_args = reward_args, 
+                id = id,
+                model_save_path = args.save_path,
+                langevin = args.langevin,
+                inference_type = args.inference,
+                tb = args.tb,
+                load_ckpt = args.load_ckpt,
+                load_ckpt_path = args.load_path,
+                entity = args.entity,
+                diffusion_steps = args.diffusion_steps, 
+                beta_start = args.beta_start, 
+                beta_end = args.beta_end,
+                loss_batch_size = args.loss_batch_size,
+                replay_buffer = replay_buffer,
+                posterior_architecture = posterior_architecture)
+
+
+else:
+
+    rtb_model = rtb.RTBModel(
+                device = device, 
+                reward_model = reward_model,
+                prior_model = prior_model,
+                in_shape = in_shape, 
+                reward_args = reward_args, 
+                id = id,
+                model_save_path = args.save_path,
+                langevin = args.langevin,
+                inference_type = args.inference,
+                tb = args.tb,
+                load_ckpt = args.load_ckpt,
+                load_ckpt_path = args.load_path,
+                entity = args.entity,
+                diffusion_steps = args.diffusion_steps, 
+                beta_start = args.beta_start, 
+                beta_end = args.beta_end,
+                loss_batch_size = args.loss_batch_size,
+                replay_buffer = replay_buffer,
+                posterior_architecture = posterior_architecture)
 
 
 if args.langevin:
