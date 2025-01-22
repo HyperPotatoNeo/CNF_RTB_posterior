@@ -158,7 +158,7 @@ rtb_model = rtb.RTBModel(
     loss_batch_size=args.loss_batch_size,
     replay_buffer=replay_buffer,
     posterior_architecture=posterior_architecture,
-    distilled_model=f"./distilled/{args.exp}_distilled.pth"
+    distilled_model_path=f"./distilled/{args.exp}_distilled.pth"
 )
 print(' done!')
 
