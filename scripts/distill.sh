@@ -1,9 +1,9 @@
 #!/bin/bash
-#SBATCH --constraint="40gb|48gb|80gb"
-#SBATCH --gres=gpu:2
+#SBATCH --constraint="80gb"
+#SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=6
-#SBATCH --mem=42G
-#SBATCH --time=96:00:00
+#SBATCH --mem=32G
+#SBATCH --time=12:00:00
 #SBATCH --nodes=1
 #SBATCH --output=%x_%j.out
 
