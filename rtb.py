@@ -1068,8 +1068,8 @@ class RTBModel(nn.Module):
                     if wandb_track:
                         # Take the first 9 images from student_img_batch (or teacher_img_batch)
                         # and arrange them in a 3x3 grid.
-                        grid_student = vutils.make_grid([safe_to_tensor(img) for img in student_img_batch[:9]], nrow=3, padding=2, normalize=True)
-                        grid_teacher = vutils.make_grid([safe_to_tensor(img) for img in teacher_img_batch[:9]], nrow=3, padding=2, normalize=True)
+                        grid_student = vutils.make_grid([safe_to_tensor(img).float() for img in student_img_batch[:9]], nrow=3, padding=2, normalize=True)
+                        grid_teacher = vutils.make_grid([safe_to_tensor(img).float() for img in teacher_img_batch[:9]], nrow=3, padding=2, normalize=True)
 
                         # Log that grid image to wandb
                         wandb.log({
