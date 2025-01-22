@@ -5,7 +5,7 @@
 #SBATCH --mem=32G
 #SBATCH --time=12:00:00
 #SBATCH --nodes=1
-#SBATCH --output=%x_%j.out
+#SBATCH --partition=unkillable
 
 # or > salloc --gres=gpu:rtx8000:2 --cpus-per-task=8 --mem=32G  --time=12:00:00 --nodes=1 --partition=main
 
