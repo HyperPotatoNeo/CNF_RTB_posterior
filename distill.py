@@ -158,7 +158,7 @@ rtb_model = rtb.RTBModel(
     loss_batch_size=args.loss_batch_size,
     replay_buffer=replay_buffer,
     posterior_architecture=posterior_architecture,
-    distilled_model_path=f"./distilled/{args.exp}_distilled.pth"
+    distilled_model_path=f"models/distilled/{args.exp}_distilled.pth"
 )
 print(' done!')
 
@@ -178,23 +178,6 @@ if args.langevin:
 # --------------------------------------------------------------------------
 # shape for distillation:
 distill_shape = (args.batch_size, *in_shape)
-
-# We use the method distill() previously shown in the RTBModel,
-# which should be implemented something like:
-#
-# def distill(
-#     self,
-#     shape,
-#     distilled_ckpt_path,
-#     teacher_ckpt_path,
-#     n_iters=10000,
-#     learning_rate=1e-4,
-#     save_interval=500,
-#     wandb_track=False
-# ):
-#     ...
-#     # your distillation logic
-#     ...
 
 rtb_model.distill(
     shape=distill_shape,
