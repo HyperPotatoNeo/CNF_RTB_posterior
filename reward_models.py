@@ -10,6 +10,8 @@ from sngan_cifar10.sngan_cifar10 import Discriminator, SNGANConfig
 #from aesthetic_reward.mlp_model import MLP
 import clip 
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 def score_differentiable(self, prompt, img):
     # text encode
     text_input = self.blip.tokenizer(prompt, padding='max_length', truncation=True, max_length=35, return_tensors="pt").to(self.device)
@@ -19,8 +21,8 @@ def score_differentiable(self, prompt, img):
     means = [0.48145466, 0.4578275, 0.40821073]
     stds  = [0.26862954, 0.26130258, 0.27577711]
 
-    mean_t = torch.tensor(means).view(1, -1, 1, 1).cuda()  # shape: (1, 3, 1, 1)
-    std_t  = torch.tensor(stds).view(1, -1, 1, 1).cuda()   # shape: (1, 3, 1, 1)
+    mean_t = torch.tensor(means).view(1, -1, 1, 1).to(device)  # shape: (1, 3, 1, 1)
+    std_t  = torch.tensor(stds).view(1, -1, 1, 1).to(device)   # shape: (1, 3, 1, 1)
 
     # Normalize: (x - mean) / std
     image = (image - mean_t) / std_t
@@ -45,7 +47,7 @@ class ImageRewardPrompt():
     def __init__(self, device, prompt, differentiable=False):
         self.device = device
         self.prompt = prompt 
-        self.reward_model = RM.load("ImageReward-v1.0").to("cuda")
+        self.reward_model = RM.load("ImageReward-v1.0").to(device)
         self.differentiable = differentiable
         if differentiable:
             self.reward_model.score_differentiable = types.MethodType(score_differentiable, self.reward_model)
@@ -128,13 +130,13 @@ class CIFARClassifier():
         self.target_class = target_class
 
     def __call__(self, img, *args):
-        logits = self.classifer((img.float() / 255 - torch.tensor(self.classifier_mean).cuda()[None, :, None, None]) / torch.tensor(self.classifier_std).cuda()[None, :, None, None])
+        logits = self.classifer((img.float() / 255 - torch.tensor(self.classifier_mean).to(device)[None, :, None, None]) / torch.tensor(self.classifier_std).to(device)[None, :, None, None])
         log_prob = torch.nn.functional.log_softmax(logits, dim=1)
         log_r = log_prob[:, self.target_class].to(self.device)
         return log_r 
     
     def get_class_logits(self, img, *args):
-        logits = self.classifer((img.float() / 255 - torch.tensor(self.classifier_mean).cuda()[None, :, None, None]) / torch.tensor(self.classifier_std).cuda()[None, :, None, None])
+        logits = self.classifer((img.float() / 255 - torch.tensor(self.classifier_mean).to(device)[None, :, None, None]) / torch.tensor(self.classifier_std).to(device)[None, :, None, None])
         log_prob = torch.nn.functional.log_softmax(logits, dim=1)
         return log_prob
     
