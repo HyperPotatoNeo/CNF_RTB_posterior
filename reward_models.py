@@ -5,7 +5,7 @@ import torch.nn as nn
 import numpy as np
 import ImageReward as RM 
 from cifar10_models.vgg import vgg13_bn
-from sngan_cifar10.sngan_cifar10 import Discriminator, SNGANConfig
+# from sngan_cifar10.sngan_cifar10 import Discriminator, SNGANConfig
 
 #from aesthetic_reward.mlp_model import MLP
 import clip 
@@ -141,18 +141,18 @@ class CIFARClassifier():
         return log_prob
     
 
-class SNGANDiscriminatorReward():
-    def __init__(self, device):
-        self.device = device
-        checkpoint = torch.load("./sngan_cifar10/checkpoint.pth")
-        args = SNGANConfig()
-        self.discriminator = Discriminator(args).to(device)
-        self.discriminator.load_state_dict(checkpoint['dis_state_dict'])
-        
-    def __call__(self, img, *args):
-        img_normalized = img.float()/127.5 - 1
-        discriminator_score = self.discriminator(img_normalized)
-        return discriminator_score[:,0]
+# class SNGANDiscriminatorReward():
+#     def __init__(self, device):
+#         self.device = device
+#         checkpoint = torch.load("./sngan_cifar10/checkpoint.pth")
+#         args = SNGANConfig()
+#         self.discriminator = Discriminator(args).to(device)
+#         self.discriminator.load_state_dict(checkpoint['dis_state_dict'])
+#
+#     def __call__(self, img, *args):
+#         img_normalized = img.float()/127.5 - 1
+#         discriminator_score = self.discriminator(img_normalized)
+#         return discriminator_score[:,0]
 
 # A trainable reward model, takes as input (in_shape), and 
 # outputs scalar reward

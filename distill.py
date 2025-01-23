@@ -1,8 +1,10 @@
 import torch
 import argparse
 from distutils.util import strtobool
+from torchvision import datasets, transforms
 
 import rtb
+import os
 # import tb
 import reward_models
 import prior_models
@@ -31,7 +33,7 @@ parser.add_argument('--prompt', type=str,
                     help='Prompt for model prior')
 parser.add_argument('--reward_prompt', type=str, default="An old man",
                     help='Prompt for reward model (defaults to args.prompt)')
-parser.add_argument('--target_class', type=int, default=0,
+parser.add_argument('--target_class', type=int, default=1,
                     help='Target class for classifier-tuning methods')
 parser.add_argument('--diffusion_steps', type=int, default=100)
 parser.add_argument('--wandb_track', default=False, type=strtobool,
@@ -74,7 +76,7 @@ parser.add_argument('--teacher_ckpt_filename', default=None, type=str,
                          'Model checkpoint filename')
 parser.add_argument('--teacher_ckpt_path', default=None, type=str,
                     help='Path to teacher (fine-tuned) model checkpoint')
-parser.add_argument('--distill_iters', default=5000, type=int,
+parser.add_argument('--distill_iters', default=5050, type=int,
                     help='Number of distillation iterations (if separate from n_iters)')
 parser.add_argument('--distill_lr', default=1e-4, type=float,
                     help='Distillation learning rate')
@@ -173,6 +175,24 @@ if args.langevin:
     )
     print(' done!')
 
+if 'cifar' in args.exp:
+    transform = transforms.Compose([transforms.ToTensor()])
+    train_dataset = datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
+    class_label = args.target_class
+    output_dir = 'fid/cifar10_class_' + str(class_label)
+    os.makedirs(output_dir, exist_ok=True)
+    generated_images_dir = 'fid/' + args.exp + '_cifar10_class_' + str(class_label)
+    os.makedirs(generated_images_dir, exist_ok=True)
+
+    # Filter and save images of class if not already saved
+    for i, (img, label) in enumerate(train_dataset):
+        if label == class_label:
+            output_path = os.path.join(output_dir, f'{i}.png')
+            if not os.path.exists(output_path):  # Only save if the file doesn't exist
+                img = transforms.ToPILImage()(img)
+                img.save(output_path)
+
+
 # --------------------------------------------------------------------------
 # DISTILL CALL
 # --------------------------------------------------------------------------
@@ -187,5 +207,8 @@ rtb_model.distill(
     n_iters=args.distill_iters,
     learning_rate=args.distill_lr,
     save_interval=args.distill_save_interval,
-    wandb_track=args.wandb_track
+    wandb_track=args.wandb_track,
+    exp=args.exp,
+    compute_fid=True,
+    class_label=args.target_class,
 )

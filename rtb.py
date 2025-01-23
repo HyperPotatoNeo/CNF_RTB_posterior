@@ -577,7 +577,272 @@ class RTBModel(nn.Module):
                 'x0': xT
             }
         return logs
-    
+
+    def ddim_sample(
+            self,
+            shape,
+            steps,
+            condition: list = [],
+            likelihood_score_fn=None,
+            guidance_factor=0.,
+            save_traj=False,
+            prior_sample=False,
+            eta=0.0,  # Controls stochasticity, 0 is fully deterministic
+    ):
+        """
+        DDIM sampling for SDEs with improved x0 prediction and log probability tracking.
+
+        Args:
+            shape: Shape of the tensor to sample (including batch size).
+            steps: Number of sampling steps to perform.
+            condition: Optional conditioning information.
+            likelihood_score_fn: Additional drift function for posterior sampling.
+            guidance_factor: Multiplicative factor for the likelihood drift.
+            save_traj: Whether to save the trajectory of the sampling process.
+            prior_sample: Whether to sample from the prior distribution.
+            eta: Controls the level of stochasticity (0 is deterministic, 1 is like DDPM).
+        Returns:
+            logs: Dictionary containing sampling results and logs.
+        """
+        B, *D = shape
+        if likelihood_score_fn is None:
+            likelihood_score_fn = lambda t, x: 0.
+
+        # Initialization
+        x = self.sde.prior(D).sample([B]).to(self.device)  # Initial noise
+        t = torch.ones(B).to(self.device) * self.sde.T
+
+        normal_dist = torch.distributions.Normal(
+            torch.zeros((B,) + tuple(D), device=self.device),
+            torch.ones((B,) + tuple(D), device=self.device)
+        )
+
+        logpf_posterior = normal_dist.log_prob(x).sum(tuple(range(1, len(x.shape)))).to(self.device)
+        logpb = normal_dist.log_prob(x).sum(tuple(range(1, len(x.shape)))).to(self.device)
+
+        traj = [x.clone()] if save_traj else None
+        timesteps = torch.linspace(self.sde.T, self.sde.epsilon, steps + 1, device=self.device)
+
+        for i in range(steps):
+            t_cur = timesteps[i].expand(B)
+            t_next = timesteps[i + 1].expand(B)
+
+            # Drift and diffusion terms
+            drift = self.sde.drift(t_cur, x)
+            diffusion = self.sde.diffusion(t_cur, x)
+            std_cur = diffusion * ((t_cur - t_next).abs() ** 0.5)
+
+            # Correct model output with guidance
+            lp_correction = self.get_langevin_correction(x)
+            model_output = self.model(t_cur, x) + lp_correction
+            guidance_score = guidance_factor * likelihood_score_fn(t_cur, x)
+            guided_model_output = model_output + guidance_score
+
+            # Improved x0 prediction
+            x0 = x - drift * t_cur / self.sde.T + diffusion ** 2 * guided_model_output
+
+            # Deterministic update step
+            x_mean = x0 * (t_next / t_cur).sqrt() + (1 - (t_next / t_cur)).sqrt() * x
+
+            # Add noise for stochasticity if eta > 0
+            if eta > 0:
+                noise = torch.randn_like(x)
+                x = x_mean + eta * std_cur * noise
+            else:
+                x = x_mean
+
+            # Log probability calculations
+            pf_post_dist = torch.distributions.Normal(x_mean, std_cur)
+            logpb += pf_post_dist.log_prob(x).sum(tuple(range(1, len(x.shape))))
+            logpf_posterior += pf_post_dist.log_prob(x).sum(tuple(range(1, len(x.shape))))
+
+            if save_traj:
+                traj.append(x.clone())
+
+            if torch.any(torch.isnan(x)):
+                print("Diffusion is not stable, NaN were produced. Stopped sampling.")
+                break
+
+        logs = {
+            "x_final": x,
+            "traj": traj if save_traj else None,
+            "logpf_posterior": logpf_posterior,
+            "logpf_prior": logpb
+        }
+        return logs
+
+    def forward_ddim(
+            self,
+            shape,
+            steps,
+            condition: list = [],
+            likelihood_score_fn=None,
+            guidance_factor=0.,
+            detach_freq=0.0,
+            backward=False,
+            x_1=None,
+            save_traj=False,
+            prior_sample=False,
+            time_discretisation='uniform',  # Kept for parity, unused here
+            distilled=False  # Ignored by request
+    ):
+        """
+
+        Args:
+            shape:            Shape of the tensor to sample (including batch size).
+            steps:            Number of update steps.
+            condition:        Optional conditioning.
+            likelihood_score_fn: Additional drift/score for posterior sampling.
+            guidance_factor:  Unused here, but you could include it in `guided_model_output`.
+            detach_freq:      Unused here, kept only for signature parity.
+            backward:         Whether to sample backward from x_1 (reverse time).
+            x_1:              The terminal state if `backward=True`.
+            save_traj:        Whether to store and return trajectory frames.
+            prior_sample:     If True, add noise (like in standard forward approach).
+            time_discretisation: For signature compatibility, not used in this snippet.
+            distilled:        Ignored in this snippet, no distilled model usage.
+
+        Returns:
+            logs: Dictionary with:
+                - 'x_mean_posterior': Final sample(s).
+                - 'logpf_prior':      Approx log-prob from prior transitions.
+                - 'logpf_posterior':  Approx log-prob from posterior transitions.
+                - 'traj':             Trajectory of samples (if `save_traj=True`).
+                - 'x0':               Initial sample (for forward) or x_1 if backward.
+        """
+
+        B, *D = shape
+        sampling_from = "prior" if likelihood_score_fn is None else "posterior"
+        if likelihood_score_fn is None:
+            likelihood_score_fn = lambda t, x: 0.
+
+        # Choose initial state (forward or backward)
+        if backward:
+            x = x_1
+            # Start time near 0
+            t = torch.zeros(B, device=self.device) + self.sde.epsilon
+            x0 = x_1  # Just to store in logs
+        else:
+            x = self.sde.prior(D).sample([B]).to(self.device)
+            # Start time near T
+            t = torch.ones(B, device=self.device) * self.sde.T
+            x0 = x.clone()  # Store initial forward sample
+
+        # Distributions for log-prob tracking
+        normal_dist = torch.distributions.Normal(
+            torch.zeros((B,) + tuple(D), device=self.device),
+            torch.ones((B,) + tuple(D), device=self.device)
+        )
+
+        # Initialize log-prob sums
+        logpf_posterior = 0.0 * normal_dist.log_prob(x).sum(tuple(range(1, len(x.shape)))).to(self.device)
+        logpb = 0.0 * normal_dist.log_prob(x).sum(tuple(range(1, len(x.shape)))).to(self.device)
+
+        # Discrete time step from T->0 or 0->T
+        dt = -1.0 / (steps + 1)  # negative sign so that t + dt moves from T down to 0
+        # or from 0 up to T if backward=True
+
+        if save_traj:
+            traj = [x.clone()]
+
+        for step, _ in enumerate((pbar := tqdm(range(steps)))):
+            pbar.set_description(
+                f"DDIM sampling from the {sampling_from} | t = {t[0].item():.1f} "
+                f"| sigma = {self.sde.sigma(t)[0].item():.1e} | scale ~ {x.std().item():.1e}"
+            )
+
+            # If we're doing backward sampling, update x first
+            if backward:
+                g = self.sde.diffusion(t, x)
+                std = g * (abs(dt) ** 0.5)
+                x_prev = x.detach()
+                # Deterministic "reverse" update step
+                x = x + (-self.sde.drift(t, x) * dt)  # Remove random noise for DDIM
+
+            else:
+                x_prev = x.detach()
+
+            # Advance or rewind time
+            t_next = t + dt * (-1.0 if backward else 1.0)
+            t = t_next.clone()
+
+            # If time has dropped below epsilon in forward pass, skip
+            if t[0] < self.sde.epsilon:
+                continue
+
+            # Main "DDIM" step: no random noise, purely deterministic (unless prior_sample=True)
+            g = self.sde.diffusion(t, x)
+            lp_correction = self.get_langevin_correction(x)
+            score = self.model(t, x) + lp_correction + guidance_factor * likelihood_score_fn(t, x)
+
+            # Posterior drift is typical "reverse-SDE" style:
+            #   drift(t,x) = - f(t,x) - g^2 * score / sigma(t)
+            # Here we just skip the random noise part to be deterministic.
+            posterior_drift = (
+                    -self.sde.drift(t, x)
+                    - (g ** 2) * score / self.sde.sigma(t).view(-1, *([1] * len(D)))
+            )
+
+            # Deterministic update
+            x_mean_posterior = x + posterior_drift * dt
+            std = g * (abs(dt) ** 0.5)
+
+            if prior_sample and not backward:
+                # If requested, we add random noise same as the original "forward" method
+                x = x_mean_posterior + std * torch.randn_like(x)
+            elif not backward:
+                # Pure DDIM step (no random noise)
+                x = x_mean_posterior
+
+            x = x.detach()
+
+            if backward:
+                # For backward, x_prev is "the next" in forward sense
+                pb_drift = -self.sde.drift(t, x)
+                x_mean_pb = x + pb_drift * dt
+                pb_std = std
+                pf_post_dist = torch.distributions.Normal(x_mean_posterior, std)
+                pb_dist = torch.distributions.Normal(x_mean_pb, pb_std)
+
+                # log-prob at the old state x_prev under the new distribution
+                logpb += pb_dist.log_prob(x_prev).sum(tuple(range(1, len(x.shape))))
+                logpf_posterior += pf_post_dist.log_prob(x_prev).sum(tuple(range(1, len(x.shape))))
+            else:
+                # For forward
+                pb_drift = -self.sde.drift(t, x_prev)
+                x_mean_pb = x_prev + pb_drift * dt
+                pb_std = g * (abs(dt) ** 0.5)
+
+                pf_post_dist = torch.distributions.Normal(x_mean_posterior, std)
+                pb_dist = torch.distributions.Normal(x_mean_pb, pb_std)
+
+                # log-prob at the new state x under that distribution
+                logpb += pb_dist.log_prob(x).sum(tuple(range(1, len(x.shape))))
+                logpf_posterior += pf_post_dist.log_prob(x).sum(tuple(range(1, len(x.shape))))
+
+            # Save trajectory if requested
+            if save_traj:
+                traj.append(x.clone())
+
+            # Check for NaNs
+            if torch.any(torch.isnan(x)):
+                print("DDIM sampling encountered NaNs; stopping.")
+                break
+
+        # Reverse the trajectory if we were going backward, to match original code’s convention
+        if backward and save_traj:
+            traj = list(reversed(traj))
+
+        logs = {
+            'x_mean_posterior': x,
+            'logpf_prior': logpb,
+            'logpf_posterior': logpf_posterior,
+            'traj': traj if save_traj else None,
+            'x0': x0  # The starting noise (forward) or the provided x_1 (backward)
+        }
+
+        return logs
+
     def forward_ddpm(
             self,
             shape,
@@ -924,7 +1189,10 @@ class RTBModel(nn.Module):
             n_iters=10000,
             learning_rate=1e-4,
             save_interval=500,
-            wandb_track=False
+            wandb_track=False,
+            exp='sd3_align',
+            compute_fid=False,
+            class_label=0,
     ):
         """
         Distills a fine-tuned diffusion model (self.model) into a single-step generator,
@@ -998,7 +1266,7 @@ class RTBModel(nn.Module):
 
         for it in range(n_iters):
             # (a) Sample random noise for teacher's multi-step generation
-            B = shape[0]
+            B, *D = shape
 
             # (b) Generate teacher sample (multi-step) using VPSDE or DDPM
             with torch.no_grad():
@@ -1063,14 +1331,13 @@ class RTBModel(nn.Module):
             # ---------------------------------------------------------------------
             # (f) Logging
             # ---------------------------------------------------------------------
-            if wandb_track:
-                wandb.log({
-                    "distill_loss": loss.item(),
-                    "iter": it,
-                    "regularizer_loss": mean_pairwise_dist,
-                    "dist_variance": dvar,
-                    "mse": mse
-                })
+            log_dict = {
+                "distill_loss": loss.item(),
+                "iter": it,
+                "regularizer_loss": mean_pairwise_dist,
+                "dist_variance": dvar,
+                "mse": mse
+            }
 
             if it % 100 == 0:
                 print(f"[Distill Iter {it}/{n_iters}] Loss = {loss.item():.6f}")
@@ -1092,16 +1359,35 @@ class RTBModel(nn.Module):
                         grid_teacher = vutils.make_grid([safe_to_tensor(img).float() for img in teacher_img_batch[:9]], nrow=3, padding=2, normalize=True)
 
                         # Log that grid image to wandb
-                        wandb.log({
+                        log_dict.update({
                             "student_3x3_grid": wandb.Image(grid_student, caption="Distilled Samples"),
                             "teacher_3x3_grid": wandb.Image(grid_teacher, caption="Diffusion Samples"),
                             "iter": it
                         })
 
+
             # ---------------------------------------------------------------------
             # 4) SAVE CHECKPOINT EVERY `save_interval`
             # ---------------------------------------------------------------------
-            if it % save_interval == 0 and it > 0:
+            if it % save_interval == 0:# and it > 0:
+
+                if 'cifar' in exp:
+                    print('COMPUTING FID:')
+                    generated_images_dir = 'fid/' + exp + '_cifar10_class_' + str(class_label)
+                    true_images_dir = 'fid/cifar10_class_' + str(class_label)
+                    for k in range(60):
+                        with torch.no_grad():
+                            x_distilled = self.distilled_model(
+                                t=torch.zeros(100, device=self.device),
+                                x=self.sde.prior(D).sample([100]).to(self.device)
+                            )
+                            img_fid = self.prior_model(x_distilled)
+                            for i, img_tensor in enumerate(img_fid):
+                                img_pil = transforms.ToPILImage()(img_tensor)
+                                img_pil.save(os.path.join(generated_images_dir, f'{k * 100 + i}.png'))
+                    fid_score = fid.compute_fid(generated_images_dir, true_images_dir)
+                    log_dict['fid'] = fid_score
+
                 os.makedirs(distilled_ckpt_path, exist_ok=True)
                 ckpt_filename = os.path.join(distilled_ckpt_path, f"distilled_checkpoint_{it}.pth")
                 torch.save({
@@ -1109,6 +1395,9 @@ class RTBModel(nn.Module):
                     'optimizer_state_dict': distilled_optimizer.state_dict()
                 }, ckpt_filename)
                 print(f"Distilled UNet checkpoint saved at iteration {it} -> {ckpt_filename}")
+
+            if wandb_track:
+                wandb.log(log_dict)
 
         print("Distillation complete. Your student model (same class as teacher) is in self.distilled_model.")
 
