@@ -175,6 +175,7 @@ class RTBModel(nn.Module):
             logr_x_prime = self.log_reward(x_mean_posterior)
 
             logr_prior_x_prime = logr_x_prime #+ prior_dist.log_prob(x_mean_posterior).sum(tuple(range(1, len(x_mean_posterior.shape)))).to(self.device).detach()
+            
             # vargrad
             if iw_logz and prior_sample:
                 #self.logZ.data = (logr_prior_x_prime).logsumexp(dim=0) - np.log(B)
