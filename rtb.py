@@ -334,6 +334,21 @@ class RTBModel(nn.Module):
                 prior_reward = self.reward_model(img, *self.reward_args)
             wandb.log({"prior_samples": [wandb.Image(img[k], caption = prior_reward[k]) for k in range(len(img))]})
             
+        if 'sd3' in exp:
+            print('SAVING IMAGES:')
+            generated_images_dir = self.model_save_path + run_name + '/' + 'prior_images'
+            os.makedirs(generated_images_dir, exist_ok=True)
+            for k in range(10):
+                with torch.no_grad():
+                    logs = self.forward(
+                            shape=(10, *D),
+                            steps=self.steps
+                            )
+                    x = logs['x_mean_posterior']
+                    img_x = self.prior_model(x)
+                for i, img_tensor in enumerate(img_x):
+                    img_tensor.save(os.path.join(generated_images_dir, f'{k*10 + i}.png'))
+            
         for it in range(load_it, n_iters):
             prior_traj = False
             rb_traj = False
@@ -382,11 +397,29 @@ class RTBModel(nn.Module):
                             log_dict = {"loss": loss.item(), "logZ": self.logZ.detach().cpu().numpy(), "log_r": logr.item(), "epoch": it, 
                                    "posterior_samples": [wandb.Image(img[k], caption=post_reward[k]) for k in range(len(img))]}
                         
+                        if it%1000 == 0 and it > 0 and 'sd3' in exp:
+                            print('SAVING IMAGES:')
+                            generated_images_dir = self.model_save_path + run_name + '/' + 'posterior_images'
+                            os.makedirs(generated_images_dir, exist_ok=True)
+                            for k in range(10):
+                                with torch.no_grad():
+                                    logs = self.forward(
+                                            shape=(10, *D),
+                                            steps=self.steps
+                                            )
+                                    x = logs['x_mean_posterior']
+                                    img_x = self.prior_model(x)
+                                for i, img_tensor in enumerate(img_x):
+                                    img_tensor.save(os.path.join(generated_images_dir, f'{k*10 + i}.png'))
+                        
                         if it%1000 == 0 and 'cifar' in exp and compute_fid:# and it>0:
                             print('COMPUTING FID:')
+                            if 'improve' in exp:
+                                class_label = 20
                             generated_images_dir = 'fid/' + exp + '_cifar10_class_' + str(class_label)
                             true_images_dir = 'fid/cifar10_class_' + str(class_label)
-                            for k in range(60):
+                            K = 600 if 'improve' in exp else 60
+                            for k in range(K):
                                 with torch.no_grad():
                                     logs = self.forward(
                                         shape=(100, *D),

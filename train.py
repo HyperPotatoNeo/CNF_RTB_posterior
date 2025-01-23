@@ -112,6 +112,8 @@ if 'cifar' in args.exp and args.compute_fid:
     transform = transforms.Compose([transforms.ToTensor()])
     train_dataset = datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
     class_label = args.target_class
+    if 'improve' in args.exp: #all class fid for gan improve
+        class_label = 20
     output_dir = 'fid/cifar10_class_' + str(class_label)
     os.makedirs(output_dir, exist_ok=True)
     generated_images_dir = 'fid/' + args.exp + '_cifar10_class_' + str(class_label)
@@ -120,6 +122,9 @@ if 'cifar' in args.exp and args.compute_fid:
     # Filter and save images of class
     for i, (img, label) in enumerate(train_dataset):
         if label == class_label:
+            img = transforms.ToPILImage()(img)
+            img.save(os.path.join(output_dir, f'{i}.png'))
+        if class_label == 20:
             img = transforms.ToPILImage()(img)
             img.save(os.path.join(output_dir, f'{i}.png'))
 
