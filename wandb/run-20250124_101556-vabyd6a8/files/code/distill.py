@@ -209,7 +209,6 @@ rtb_model.distill(
     save_interval=args.distill_save_interval,
     wandb_track=args.wandb_track,
     exp=args.exp,
-    compute_fid=False,
+    compute_fid=True,
     class_label=args.target_class,
-    ddim=True
 )

@@ -211,5 +211,4 @@ rtb_model.distill(
     exp=args.exp,
     compute_fid=False,
     class_label=args.target_class,
-    ddim=True
 )
