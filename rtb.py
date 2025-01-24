@@ -1130,9 +1130,9 @@ class RTBModel(nn.Module):
 
                 if 'cifar' in exp:
                     print('COMPUTING FID:')
-                    generated_images_distilled_dir = 'fid/' + exp + '_cifar10_class_' + str(class_label)
-                    generated_images_ode_dir = 'fid/' + exp + '_cifar10_class_' + str(class_label)
-                    generated_images_sde_dir = 'fid/' + exp + '_cifar10_class_' + str(class_label)
+                    generated_images_distilled_dir = 'fid/' + exp + 'distilled_cifar10_class_' + str(class_label)
+                    generated_images_ode_dir = 'fid/' + exp + 'ode_cifar10_class_' + str(class_label)
+                    generated_images_sde_dir = 'fid/' + exp + 'sde_cifar10_class_' + str(class_label)
                     true_images_dir = 'fid/cifar10_class_' + str(class_label)
                     for k in range(60):
                         with torch.no_grad():
