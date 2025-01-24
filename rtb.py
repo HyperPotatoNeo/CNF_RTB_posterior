@@ -1134,6 +1134,9 @@ class RTBModel(nn.Module):
                     generated_images_ode_dir = 'fid/' + exp + 'ode_cifar10_class_' + str(class_label)
                     generated_images_sde_dir = 'fid/' + exp + 'sde_cifar10_class_' + str(class_label)
                     true_images_dir = 'fid/cifar10_class_' + str(class_label)
+                    os.makedirs(generated_images_distilled_dir, exist_ok=True)
+                    os.makedirs(generated_images_ode_dir, exist_ok=True)
+                    os.makedirs(generated_images_sde_dir, exist_ok=True)
                     for k in range(60):
                         with torch.no_grad():
                             x_distilled = self.distilled_model(
