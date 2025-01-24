@@ -10,6 +10,8 @@ import reward_models
 import prior_models
 from replay_buffer import ReplayBuffer
 
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 parser = argparse.ArgumentParser()
