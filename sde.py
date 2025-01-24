@@ -34,13 +34,6 @@ class VPSDE():
             # Clamp beta_t to be within [beta_min, beta_max]
             beta_t = torch.clamp(beta_t, min=self.beta_min, max=self.beta_max)
             return beta_t
-        elif self.beta_schedule == 'memoryless':
-            # Approximate a large beta near t=0 => quickly forget the initial state
-            small_eps = 1e-5
-            t_mod = t + small_eps
-            beta_t = 1.0 / t_mod
-            beta_t = torch.clamp(beta_t, min=self.beta_min, max=self.beta_max)
-            return beta_t
 
     def sigma(self, t: Tensor) -> Tensor:
         return self.marginal_prob_scalars(t)[1]
@@ -72,16 +65,6 @@ class VPSDE():
             coeff = cos_phi_t / cos_phi_0
             std = torch.sqrt(1. - coeff**2)
             return coeff, std
-        elif self.beta_schedule == 'memoryless':
-            # For memoryless, we do not provide an exact integral 
-            # (it would be log-divergent if truly 1/t near zero).
-            # This is just a simple approximation:
-            #   alpha_approx(t) = exp(-c * t),
-            # with c chosen to mimic a large integral from t=0 to 1.
-            c = 50.0  # arbitrary large constant
-            alpha_approx = torch.exp(-0.5 * c * t)
-            std = torch.sqrt(1. - alpha_approx**2)
-            return alpha_approx, std
 
 
 # Memoryless SDE that as same marginal with Flow Matching ODE introduced in the paper "Adjoint Matching (Domingo-Enrich et al., 2024)"
@@ -123,7 +106,7 @@ class MemorylessSDE():
         mu = torch.zeros(shape).to(self.device)
         return Independent(Normal(loc=mu, scale=1., validate_args=False), len(shape))
 
-    def diffusion(self, t: Tensor, x: Tensor) -> Tensor:
+    def diffusion(self, t: Tensor, x: Tensor) -> Tensor:  
         _, *D = x.shape
         return torch.sqrt(2.0 * self.eta(t)).view(-1, *[1]*len(D))
 
@@ -131,6 +114,9 @@ class MemorylessSDE():
     def drift(self, t: Tensor, x: Tensor) -> Tensor:
         _, *D = x.shape
         return -self.kappa(t).view(-1, *[1]*len(D)) * x
+
+
+
 
 
 

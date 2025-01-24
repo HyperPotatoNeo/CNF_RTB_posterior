@@ -39,16 +39,11 @@ class RTBModel(nn.Module):
                  beta_end=10.0,
                  loss_batch_size=64,
                  replay_buffer=None,
-                 posterior_architecture='unet'):
+                 posterior_architecture='unet',
+                 detach_freq=0.8):
         super().__init__()
         self.device = device
         
-        # if inference_type == 'vpsde':
-        #     self.sde = VPSDE(device = self.device, beta_schedule='cosine', beta_max = 0.05, beta_min = 0.0001)
-        # else:
-        #     self.sde = DDPM(device = self.device, beta_schedule='cosine')
-
-
         self.sde = MemorylessSDE(device = self.device)
         self.sde_type = self.sde.sde_type
 
@@ -77,7 +72,7 @@ class RTBModel(nn.Module):
         tol = 1e-5
 
         self.reward_model = reward_model 
-
+        self.num_backprop_steps = int((1-detach_freq) * self.steps) 
 
         self.trainable_reward = None 
         
@@ -88,6 +83,24 @@ class RTBModel(nn.Module):
             self.load_ckpt_path = os.path.expanduser(load_ckpt_path)
         else:
             self.load_ckpt_path = load_ckpt_path 
+
+    @staticmethod
+    def select_random_time_steps(total_steps, num_backprop_steps=4):
+        """
+        Randomly selects `num_backprop_steps` unique time steps from `0` to `total_steps - 1`.
+        
+        Args:
+            total_steps (int): Total number of time steps.
+            num_backprop_steps (int): Number of time steps to select for backpropagation.
+        
+        Returns:
+            set: A set containing the indices of selected time steps.
+        """
+        if num_backprop_steps > total_steps:
+            raise ValueError("Number of backpropagation steps cannot exceed total steps.")
+        
+        selected_steps = set(random.sample(range(total_steps), num_backprop_steps))
+        return selected_steps
 
 
     def save_checkpoint(self, model, optimizer, epoch, run_name):
@@ -151,58 +164,63 @@ class RTBModel(nn.Module):
             return log_r, img
         return log_r
 
-    def batched_adjoint_matching(self, shape, steps=20, dt=None):
+  
+    
+
+    def batched_adjoint_matching(self, shape, steps=20, dt=None, num_backprop_steps=4):
         """
-        Perform one iteration of Adjoint Matching:
-          1) Forward pass (Euler-Maruyama) with the *current* model (self.model)
-             to sample trajectories {X_0, ..., X_K}.
-          2) Backward pass in time computing lean adjoint states {a_K, ..., a_0}.
-          3) Form the MSE objective   sum_{k=0}^{K-1} 1/2 || control + sigma*a ||^2.
-             Then do loss.backward().
+        Perform one iteration of Adjoint Matching with selective backpropagation through randomly selected time steps.
         
-        Returns: (loss, mean_reward)
+        Args:
+            shape (tuple): Shape of the input tensor (including batch size).
+            steps (int): Total number of time steps.
+            dt (float, optional): Time step size. If None, defaults to 1.0 / steps.
+            num_backprop_steps (int): Number of time steps to backpropagate through.
+        
+        Returns:
+            tuple: (loss, mean_reward)
         """
         B, *D = shape
-        # 1) Forward pass with "save_traj=True" to store all states
-        fwd_logs = self.forward(
-            shape=shape,
-            steps=steps,
-            save_traj=True,   
-            prior_sample=False 
-        )
+        
+        # 1) Randomly select time steps for memory-efficient backpropagation
+        selected_steps = self.select_random_time_steps(steps, num_backprop_steps)
+        
+        # 2) Forward pass with "save_traj=True" to store all states
+        with torch.no_grad():
+            fwd_logs = self.forward(
+                shape=shape,
+                steps=steps,
+                save_traj=True,   
+                prior_sample=False 
+            )
 
-        traj = fwd_logs['traj']
-        x_final = traj[-1]                 
-
+        traj = fwd_logs['traj']  # List of tensors from X_0 to X_steps
+        x_final = traj[-1]       # X_steps
+        
         if dt is None:
             dt = 1.0 / steps
-        
-        # 2) Backward pass: compute lean adjoint states "adj[i]" for i=K,...,0
-        adj = [None]*(steps+1)
-        # final boundary condition:  a_K = d/dx of g(X_1) = - lambda d/dx r(X_1)
-        #   =>  g(X)= -lambda*r(X).
-        #   =>  a_K = -lambda * grad(r(X_final)).
-        x_final.requires_grad_(True)      
-        reward_final = self.log_reward(x_final, return_grad=True)  
-        # g(X_final) = - lambda * reward_final
 
-        # hyperparameter lambda
-        lambda_scale = 1.0
-        g_final = (-1.0)*lambda_scale * reward_final.sum()
+ 
+        # 4) Initialize adjoint states
+        adj = [None] * (steps + 1)
         
-        # get gradient w.r.t X_final
+        # Final boundary condition: a_steps = -lambda * grad(r(X_final))
+        x_final.requires_grad_(True)
+
+        # We want to sample proportional to the "reward": R(x): P(X) \propto R(x) = exp(r(x)).
+        # r(x) = log R(x)
+        reward_final = self.log_reward(x_final, return_grad=True)  
+        
+        lambda_scale = self.beta  # Hyperparameter lambda
+        g_final = (-lambda_scale) * reward_final.sum()
+        
+        # Compute gradient of g_final w.r.t x_final
         grad_final = torch.autograd.grad(g_final, x_final, create_graph=False)[0]
-        adj[steps] = grad_final.detach()   # shape [B, *D]
-        
-        # Lean adjoint ODE (discretized backwards)
-        #   a_{k} = a_{k+1} + dt * a_{k+1}^T * \nabla_x b(x_{k+1}, t_{k+1}),
-        #   ignoring any f(x,t) since we set f=0 in typical reward finetuning.
-        #
-        # Here b_base(x,t) = 2 * self.prior_model(t,x) + self.sde.drift(t,x).
-        
+        adj[steps] = grad_final.detach()  # a_steps
+
+        # 5) Backward pass to compute adjoint states
         for k in reversed(range(steps)):
-            x_curr = traj[k+1].detach()  # X_{k+1}; no need for gradient
-            x_curr.requires_grad_(True)
+            x_curr = traj[k+1].requires_grad_(True)
             
             # b_base = 2 * prior_model(t_{k+1}, x_curr) + sde.drift(t_{k+1}, x_curr)
             # For simplicity, treat time_{k+1} = (k+1)/steps
@@ -216,51 +234,69 @@ class RTBModel(nn.Module):
             # now accumulate:
             a_k = adj[k+1] + dt * dJdx
             adj[k] = a_k.detach()
-        
-        # 3) Build the least-squares objective for the control vs. -sigma * adjoint
-        # The control at time_k is:
-        #   control_k = (f_post - f_prior) / sigma(t_k)
-        # where f_post = 2 self.model(...) + drift, f_prior = 2 self.prior_model(...) + drift
-        # Then the target is   - sigma(t_k) * adjoint[k].
-        
+
+        # 6) Compute the Mean Squared Error (MSE) loss only for selected steps
         MSE = torch.zeros([], device=x_final.device)
-        for k in range(steps):
-            X_k = traj[k].detach()          # shape [B, *D]
-            tval = torch.ones(B, device=X_k.device)*(k/steps)
-            sigma_k = self.sde.sigma(tval)  # shape [B,1,1,...] depending on broadcast
-            
-            # Posterior drift at X_k:
-            f_post = 2.*self.model(tval, X_k) + self.sde.drift(tval, X_k)
-            # Prior drift at X_k:
-            f_prior = 2.*self.prior_model.drift(tval, X_k) + self.sde.drift(tval, X_k)
-            
-            # control = (f_post - f_prior) / sigma
- 
-            ctrl = (f_post - f_prior) / (sigma_k.view(-1,*[1]*len(D)) + 1e-8)
-            
-            # target = - sigma_k * adj[k]
-            # => we want half * || ctrl + sigma_k * adj[k] ||^2
 
-            lean_adj = adj[k]
+        for k in selected_steps:
+            X_k = traj[k].detach()          # X_k (stopgrad)
+            tval = torch.ones(B, device=X_k.device) * (k / steps)
+            sigma_k = self.sde.sigma(tval)  # sigma(t_k)
+
+            # Compute posterior and prior drifts
+            f_post = 2.0 * self.model(tval, X_k) + self.sde.drift(tval, X_k)
             
-            diff = ctrl + sigma_k.view(-1,*[1]*len(D))*lean_adj
-            # accumulate MSE
-            MSE_k = 0.5 * diff.square().sum(dim=tuple(range(1, diff.ndim)))  # sum over space
-            MSE += MSE_k.mean()  # average over batch, then accumulate
+            with torch.no_grad():
+                f_prior = 2.0 * self.prior_model.drift(tval, X_k) + self.sde.drift(tval, X_k)
+            
+
+            # Compute control
+            ctrl = (f_post - f_prior) / (sigma_k.view(-1, *[1]*len(D)) + 1e-8)
+            
+            # Compute the difference between control and target (-sigma * adj)
+            lean_adj = adj[k].detach() # stopgrad
+            diff = ctrl + sigma_k.view(-1, *[1]*len(D)) * lean_adj
+            
+            # Accumulate MSE loss
+            MSE_k = 0.5 * diff.square().sum(dim=tuple(range(1, diff.ndim))).mean()  # Sum over spatial dimensions
+            MSE_k.backward()
+            
+            MSE += MSE_k.item()  # 7) Backpropagate the loss
+        MSE = MSE/len(selected_steps)
         
-
-        MSE.backward()
         
-        mean_reward = reward_final.mean().detach()
-        return MSE.detach(), mean_reward
+        return MSE.detach(), reward_final.detach(), fwd_logs
     
+                
     
-    def finetune(self, shape, steps=20, n_iters=100000, learning_rate=5e-5, clip=0.1, wandb_track=False, prior_sample_prob=0.0, replay_buffer_prob=0.0, anneal=False, anneal_steps=15000, exp='sd3_align', compute_fid=False, class_label=0):
-
+    def finetune(self, shape, n_iters=100000, learning_rate=5e-5, clip=0.1, wandb_track=False, 
+                prior_sample_prob=0.0, replay_buffer_prob=0.0, anneal=False, anneal_steps=15000, 
+                exp='sd3_align', compute_fid=False, class_label=0):
+        """
+        Fine-tunes the model using Adjoint Matching with selective backpropagation through random time steps.
+        
+        Args:
+            shape (tuple): Shape of the input tensor (including batch size).
+            steps (int): Total number of time steps.
+            n_iters (int): Number of training iterations.
+            learning_rate (float): Learning rate for the optimizer.
+            clip (float): Maximum norm for gradient clipping.
+            wandb_track (bool): Whether to track experiments with Weights & Biases.
+            prior_sample_prob (float): Probability of sampling from the prior model.
+            replay_buffer_prob (float): Probability of sampling from the replay buffer.
+            anneal (bool): Whether to anneal beta.
+            anneal_steps (int): Number of steps for annealing.
+            exp (str): Experiment name.
+            compute_fid (bool): Whether to compute FID scores.
+            class_label (int): Class label for FID computation (if applicable).
+            num_backprop_steps (int): Number of time steps to backpropagate through (default: 4).
+        """
+        
         B, *D = shape
-        param_list = [{'params': self.model.parameters()}]
         optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate)
-        run_name = self.id + '_sde_' + self.sde_type + 'am' +'_steps_' + str(self.steps) + '_lr_' + str(learning_rate) + '_beta_start_' + str(self.beta_start) + '_beta_end_' + str(self.beta_end) + '_anneal_' + str(anneal) + '_prior_prob_' + str(prior_sample_prob) + '_rb_prob_' + str(replay_buffer_prob) 
+        run_name = (f"{self.id}_AdjMatching_steps_{self.steps}_lr_{learning_rate}"
+                    f"_beta_start_{self.beta_start}_beta_end_{self.beta_end}"
+                    f"_anneal_{anneal}")
         
         if self.load_ckpt:
             self.model, optimizer, load_it = self.load_checkpoint(self.model, optimizer)
@@ -281,81 +317,104 @@ class RTBModel(nn.Module):
                 "beta_start": self.beta_start,
                 "beta_end": self.beta_end,
                 "anneal": anneal,
-                "anneal_steps": anneal_steps
+                "anneal_steps": anneal_steps,
+                "num_backprop_steps": self.num_backprop_steps
             }
             wandb.config.update(hyperparams)
             with torch.no_grad():
-
-                img = self.sde_integration(self.prior_model, 10, self.in_shape)
+                img = self.integration(self.prior_model, 10, self.in_shape, steps=self.steps, ode = True)
                 prior_reward = self.reward_model(img, *self.reward_args)
-            wandb.log({"prior_samples": [wandb.Image(img[k], caption = prior_reward[k]) for k in range(len(img))]})
+            wandb.log({"prior_samples": [wandb.Image(img[k], caption=prior_reward[k]) for k in range(len(img))]})
 
         for it in range(load_it, n_iters):
             optimizer.zero_grad()
             
-            loss, rmean = self.batched_adjoint_matching(shape, steps=steps)
+            # Pass the number of backprop steps
+            loss, logr, logs = self.batched_adjoint_matching(shape, steps=self.steps, num_backprop_steps=self.num_backprop_steps)
             
+            logZ = (self.beta * logr + logs['logpf_prior'] - logs['logpf_posterior']).mean()
+
             if clip > 0:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=clip)
+            self.beta = self.get_beta(it, anneal, anneal_steps)
             optimizer.step() 
             
-
             if wandb_track: 
-                if not it%100 == 0:
-                    wandb.log({"loss": loss.detach().item(), "log_r": rmean.item(), "epoch": it})
+                if it % 100 != 0:
+                    wandb.log({"loss": loss.item(), "log_r": logr.mean().item(), "epoch": it, "logZ": logZ.item()})
                 else:
                     with torch.no_grad():
-   
                         logs = self.forward(
-                                shape=(10, *D),
-                                steps=self.steps)
-
-
+                            shape=(10, *D),
+                            steps=self.steps,
+                            ode = True,
+                        )
                         x = logs['x_mean_posterior']
-                        img = (x * 127.5 + 128)
+                        img = (x * 127.5 + 128).clip(0, 255)
                         post_reward = self.reward_model(img, *self.reward_args)
-                        
-                        log_dict = {"loss": loss.item(), "log_r": rmean.item(), "epoch": it, 
-                                   "posterior_samples": [wandb.Image(img[k], caption=post_reward[k]) for k in range(len(img))]}
+  
+                        logZ_ode = (self.beta * post_reward + logs['logpf_prior'] - logs['logpf_posterior']).mean() 
 
-                        if it%1000 == 0 and 'cifar' in exp and compute_fid:# and it>0:
+                        log_dict = {
+                            "loss": loss.item(),
+                            "log_r_ode": post_reward.mean().item(),
+                            "epoch": it,
+                            "logZ_ode": logZ_ode.item(),
+                            "posterior_samples": [wandb.Image(img[k], caption=post_reward[k]) for k in range(len(img))]
+                        }
+
+                        if it % 1000 == 0 and 'cifar' in exp and compute_fid:
                             print('COMPUTING FID:')
-                            generated_images_dir = 'fid/' + exp + '_cifar10_class_' + str(class_label)
-                            true_images_dir = 'fid/cifar10_class_' + str(class_label)
+                            generated_images_dir = f'fid/{exp}_am_ot_cifar10_class_{class_label}'
+                            true_images_dir = f'fid/cifar10_class_{class_label}'
+                            os.makedirs(generated_images_dir, exist_ok=True)
+                            os.makedirs(true_images_dir, exist_ok=True)  # Ensure the directory exists
+                            
+                            post_reward_test = 0
+                            logZ_test = 0
+
                             for k in range(60):
-                                with torch.no_grad():
-                                    logs = self.forward(
-                                        shape=(100, *D),
-                                        steps=self.steps
-                                        )
-                                    x = logs['x_mean_posterior']
-                                    img_fid = (x * 127.5 + 128).clip(0, 255).to(torch.uint8)
-                                    for i, img_tensor in enumerate(img_fid):
-                                        img_pil = transforms.ToPILImage()(img_tensor)
-                                        img_pil.save(os.path.join(generated_images_dir, f'{k*100 + i}.png'))
+                                logs = self.forward(
+                                    shape=(100, *D),
+                                    steps=self.steps,
+                                    ode = True,
+                                )
+                                x = logs['x_mean_posterior']
+                                img_fid = (x * 127.5 + 128).clip(0, 255).to(torch.uint8)
+
+                                post_reward_test += self.reward_model(img_fid, *self.reward_args)
+                                logZ_test += (self.beta * post_reward_test + logs['logpf_prior'] - logs['logpf_posterior']).mean()
+                                
+                                for i, img_tensor in enumerate(img_fid):
+                                    img_pil = transforms.ToPILImage()(img_tensor)
+                                    img_pil.save(os.path.join(generated_images_dir, f'{k*100 + i}.png'))
+                            
+                            post_reward_test /= 60
+                            logZ_test /= 60
+
                             fid_score = fid.compute_fid(generated_images_dir, true_images_dir)
+
+                            log_dict['log_r_test'] = post_reward_test.mean().item()
+                            log_dict['logZ_test'] = logZ_test.item()
                             log_dict['fid'] = fid_score
 
                         wandb.log(log_dict)
 
-                        # save model and optimizer state
+                        # Save model and optimizer state
                         self.save_checkpoint(self.model, optimizer, it, run_name)
-                
-        print("Done Adjoint Matching fine-tuning!")
-
-                
-    
-    
+            
+        print("Done Adjoint Matching fine-tuning!")    
 
     
 
 
-    def sde_integration(
+    def integration(
             self,
             model,
             batch_size,
             shape,
             steps = 20,
+            ode = False,
     ):
 
         x = self.sde.prior(shape).sample([batch_size]).to(self.device)
@@ -367,14 +426,16 @@ class RTBModel(nn.Module):
             x_prev = x.detach()
             
             t += dt
+            if ode:
+                x = x + model.drift(t, x) * dt
+            else:
+                g = self.sde.diffusion(t, x)
 
-            g = self.sde.diffusion(t, x)
+                learned_drift = model.drift(t, x)
 
-            learned_drift = model.drift(t, x)
+                std = g * (np.abs(dt)) ** (1 / 2)
 
-            std = g * (np.abs(dt)) ** (1 / 2)
-
-            x = x + dt * (2*learned_drift + self.sde.drift(t,x)) + std * torch.randn_like(x)
+                x = x + dt * (2*learned_drift + self.sde.drift(t,x)) + std * torch.randn_like(x)
             x = x.detach()
         
         img = (x * 127.5 + 128).clip(0, 255).to(torch.uint8)
@@ -395,7 +456,8 @@ class RTBModel(nn.Module):
             x_1=None,
             save_traj=False,
             prior_sample=False,
-            time_discretisation='uniform' #uniform/random
+            time_discretisation='uniform',
+            ode = False #uniform/random
     ):
         """
         An Euler-Maruyama integration of the model SDE with GFN for RTB
@@ -417,7 +479,9 @@ class RTBModel(nn.Module):
             x = x_1
             t = torch.ones(B).to(self.device) 
         else:
+            
             x = self.sde.prior(D).sample([B]).to(self.device)
+            x_0 = x
             t = torch.zeros(B).to(self.device) + self.sde.epsilon
 
         # assume x is gaussian noise
@@ -451,48 +515,68 @@ class RTBModel(nn.Module):
             g = self.sde.diffusion(t, x)
 
 
-            posterior_drift =  2*self.model(t, x) + self.sde.drift(t, x)
-            
-            f_posterior = posterior_drift
-            # compute parameters for denoising step (wrt posterior)
-            x_mean_posterior = x + f_posterior * dt # * (-1.0 if backward else 1.0)
-            std = g * (np.abs(dt)) ** (1 / 2)
+            if ode:
+                x_mean_posterior = x + self.model(t, x) * dt
+                x = x_mean_posterior
+            else:
 
-            # compute step
-            if prior_sample and not backward:
-                x = x + (2*self.prior_model.drift(t, x) + self.sde.drift(t, x)) * dt + std * torch.randn_like(x)
-            elif not backward:
-                x = x_mean_posterior + std * torch.randn_like(x)
+                posterior_drift =  2*self.model(t, x) + self.sde.drift(t, x)
+                
+                f_posterior = posterior_drift
+                # compute parameters for denoising step (wrt posterior)
+                x_mean_posterior = x + f_posterior * dt # * (-1.0 if backward else 1.0)
+                std = g * (np.abs(dt)) ** (1 / 2)
+
+                # compute step
+                if prior_sample and not backward:
+                    x = x + (2*self.prior_model.drift(t, x) + self.sde.drift(t, x)) * dt + std * torch.randn_like(x)
+                elif not backward:
+                    x = x_mean_posterior + std * torch.randn_like(x)
+            
             x = x.detach()
             
+            if ode:
+                x_mean_pb = x_prev + self.prior_model.drift(t, x) * dt
 
-            if backward:
-                pb_drift = (2*self.prior_model.drift(t, x) + self.sde.drift(t, x))
-                x_mean_pb = x + pb_drift * (dt)
             else:
-                pb_drift = (2*self.prior_model.drift(t,x) + self.sde.drift(t, x))
-                x_mean_pb = x_prev + pb_drift * (dt)
+                if backward:
+
+                    prior_drift = (2*self.prior_model.drift(t, x) + self.sde.drift(t, x))
+                    x_mean_prior = x + pb_drift * (dt)
+
+                    pb_drift = (self.sde.drift(t, x))
+                    x_mean_pb = x_prev + pb_drift * (dt)
+                else:
+                    pb_drift = (2*self.prior_model.drift(t,x) + self.sde.drift(t, x))
+                    x_mean_pb = x_prev + pb_drift * (dt)
             #x_mean_pb = x_prev + pb_drift * (dt)
             pb_std = g * (np.abs(dt)) ** (1 / 2)
 
             if save_traj:
                 traj.append(x.clone())
                 
-            pf_post_dist = torch.distributions.Normal(x_mean_posterior, std)
-            pb_dist = torch.distributions.Normal(x_mean_pb, pb_std)
+            if ode:
+                # x_0 ~ N(0, 1), x_1 = ODE(x_0), logpf(x_1) = N(0, 1)
+                # logpb = log p(x_0|x_1) = 0, because x_1 -> x_0 is deterministic
+                logpf_posterior = torch.distributions.Normal(torch.zeros_like(x_0), torch.ones_like(x_0)).log_prob(x_0).sum(tuple(range(1, len(x.shape))))
+                logpb = torch.zeros_like(logpf_posterior)
+            
 
+            else:
             # compute log-likelihoods of reached pos wrt to prior & posterior models
             #logpb += pb_dist.log_prob(x_prev).sum(tuple(range(1, len(x.shape))))
-            if backward:
-                logpb += pb_dist.log_prob(x_prev).sum(tuple(range(1, len(x.shape))))
-                logpf_posterior += pf_post_dist.log_prob(x_prev).sum(tuple(range(1, len(x.shape))))
-            else:
-                logpb += pb_dist.log_prob(x).sum(tuple(range(1, len(x.shape))))
-                logpf_posterior += pf_post_dist.log_prob(x).sum(tuple(range(1, len(x.shape))))
+                pf_post_dist = torch.distributions.Normal(x_mean_posterior, std)
+                pb_dist = torch.distributions.Normal(x_mean_pb, pb_std)
+                if backward:
+                    logpb += pb_dist.log_prob(x_prev).sum(tuple(range(1, len(x.shape))))
+                    logpf_posterior += pf_post_dist.log_prob(x_prev).sum(tuple(range(1, len(x.shape))))
+                else:
+                    logpb += pb_dist.log_prob(x).sum(tuple(range(1, len(x.shape))))
+                    logpf_posterior += pf_post_dist.log_prob(x).sum(tuple(range(1, len(x.shape))))
 
-            if torch.any(torch.isnan(x)):
-                print("Diffusion is not stable, NaN were produced. Stopped sampling.")
-                break
+                if torch.any(torch.isnan(x)):
+                    print("Diffusion is not stable, NaN were produced. Stopped sampling.")
+                    break
         if backward:
             traj = list(reversed(traj))
         logs = {

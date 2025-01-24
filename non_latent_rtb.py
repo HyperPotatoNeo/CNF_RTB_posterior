@@ -36,7 +36,10 @@ class RTBModel(nn.Module):
                  beta_end=10.0,
                  loss_batch_size=64,
                  replay_buffer=None,
-                 posterior_architecture='unet'):
+                 posterior_architecture='unet',
+                 detach_freq=0.0,
+                 posterior_ratio=0.2,
+                 ):
         super().__init__()
         self.device = device
         
@@ -72,9 +75,9 @@ class RTBModel(nn.Module):
 
         self.prior_model = prior_model
         tol = 1e-5
-
+        self.posterior_ratio = posterior_ratio
         self.reward_model = reward_model 
-
+        self.detach_freq = detach_freq
 
         self.trainable_reward = None 
         
@@ -195,7 +198,8 @@ class RTBModel(nn.Module):
                 shape=shape,
                 traj=fwd_logs['traj'],
                 correction=correction,
-                batch_size=B)
+                batch_size=B,
+                detach_freq=self.detach_freq)   
 
 
         return rtb_loss.detach().mean(), logr_x_prime.mean()
@@ -205,7 +209,7 @@ class RTBModel(nn.Module):
         B, *D = shape
         param_list = [{'params': self.model.parameters()}]
         optimizer = torch.optim.Adam(param_list, lr=learning_rate)
-        run_name = self.id + '_sde_' + self.sde_type + 'nl_rtb' +'_steps_' + str(self.steps) + '_lr_' + str(learning_rate) + '_beta_start_' + str(self.beta_start) + '_beta_end_' + str(self.beta_end) + '_anneal_' + str(anneal) + '_prior_prob_' + str(prior_sample_prob) + '_rb_prob_' + str(replay_buffer_prob) 
+        run_name = self.id + '_sde_' + self.sde_type + '_NL_RTB' +'_steps_' + str(self.steps) + '_lr_' + str(learning_rate) + '_beta_start_' + str(self.beta_start) + '_beta_end_' + str(self.beta_end) + '_anneal_' + str(anneal) + '_prior_prob_' + str(prior_sample_prob) + '_rb_prob_' + str(replay_buffer_prob) 
         
         if self.load_ckpt:
             self.model, optimizer, load_it = self.load_checkpoint(self.model, optimizer)
@@ -231,7 +235,7 @@ class RTBModel(nn.Module):
             wandb.config.update(hyperparams)
             with torch.no_grad():
 
-                img = self.sde_integration(self.prior_model, 10, self.in_shape)
+                img = self.integration(self.prior_model, 10, self.in_shape, steps = self.steps, ode = True)
                 prior_reward = self.reward_model(img, *self.reward_args)
             wandb.log({"prior_samples": [wandb.Image(img[k], caption = prior_reward[k]) for k in range(len(img))]})
             
@@ -263,32 +267,50 @@ class RTBModel(nn.Module):
    
                         logs = self.forward(
                                 shape=(10, *D),
-                                steps=self.steps)
-
+                                steps=self.steps, ode=True)
 
                         x = logs['x_mean_posterior']
                         img = (x * 127.5 + 128)
                         post_reward = self.reward_model(img, *self.reward_args)
-                        
+                        logZ_ode = (self.beta * post_reward + logs['logpf_prior'] - logs['logpf_posterior']).mean()
                         log_dict = {"loss": loss.item(), "logZ": self.logZ.detach().cpu().numpy(), "log_r": logr.item(), "epoch": it, 
-                                   "posterior_samples": [wandb.Image(img[k], caption=post_reward[k]) for k in range(len(img))]}
+                                   "posterior_samples": [wandb.Image(img[k], caption=post_reward[k]) for k in range(len(img))],
+                                   "logZ_ode": logZ_ode.item(), "log_r_ode": post_reward.mean().item()}
+
+
 
                         if it%1000 == 0 and 'cifar' in exp and compute_fid:# and it>0:
                             print('COMPUTING FID:')
-                            generated_images_dir = 'fid/' + exp + '_cifar10_class_' + str(class_label)
+                            generated_images_dir = f'fid/{exp}_nl_rtb_cifar10_class_{class_label}'
                             true_images_dir = 'fid/cifar10_class_' + str(class_label)
+
+                            post_reward_test = 0
+                            logZ_test = 0
+
                             for k in range(60):
                                 with torch.no_grad():
                                     logs = self.forward(
                                         shape=(100, *D),
-                                        steps=self.steps
+                                        steps=self.steps,
+                                        ode=True
                                         )
                                     x = logs['x_mean_posterior']
+                                    
                                     img_fid = (x * 127.5 + 128).clip(0, 255).to(torch.uint8)
+
+                                    post_reward_test += self.reward_model(img_fid, *self.reward_args)
+                                    logZ_test += (self.beta * post_reward_test + logs['logpf_prior'] - logs['logpf_posterior']).mean()
+
                                     for i, img_tensor in enumerate(img_fid):
                                         img_pil = transforms.ToPILImage()(img_tensor)
                                         img_pil.save(os.path.join(generated_images_dir, f'{k*100 + i}.png'))
+                            
+                            post_reward_test /= 60
+                            logZ_test /= 60
+                            
                             fid_score = fid.compute_fid(generated_images_dir, true_images_dir)
+                            log_dict['log_r_test'] = post_reward_test.mean().item()
+                            log_dict['logZ_test'] = logZ_test.item()
                             log_dict['fid'] = fid_score
 
                         wandb.log(log_dict)
@@ -296,49 +318,14 @@ class RTBModel(nn.Module):
                         # save model and optimizer state
                         self.save_checkpoint(self.model, optimizer, it, run_name)
     
-
-
-
-
-    # def sde_integration(
-    #         self,
-    #         model,
-    #         batch_size,
-    #         shape,
-    #         steps = 20,
-    # ):
-
-
-    #     x = self.sde.prior(shape).sample([batch_size]).to(self.device)
-    #     t = torch.zeros(batch_size).to(self.device)      
-    #     dt = 1/(steps+1)
-        
-    #     for step, _ in enumerate(range(steps)):
-
-    #         x_prev = x.detach()
-            
-    #         t += dt
-
-    #         g = self.sde.diffusion(t, x)
-
-    #         learned_drift = model.drift(1-t, x)
-            
-    #         std = g * (np.abs(dt)) ** (1 / 2)
-
-
-    #         x = x - learned_drift * dt + std * torch.randn_like(x)
-    #         x = x.detach()
-    #     img = (x * 127.5 + 128).clip(0, 255).to(torch.uint8)
-    #     return img
-
-
     # Euler-Maruyama integration of memoryless flow matching SDE 
-    def sde_integration(
+    def integration(
             self,
             model,
             batch_size,
             shape,
             steps = 20,
+            ode = False,
     ):
 
         x = self.sde.prior(shape).sample([batch_size]).to(self.device)
@@ -350,20 +337,20 @@ class RTBModel(nn.Module):
             x_prev = x.detach()
             
             t += dt
+            if ode:
+                x = x + model.drift(t, x) * dt
+            else:
+                g = self.sde.diffusion(t, x)
 
-            g = self.sde.diffusion(t, x)
+                learned_drift = model.drift(t, x)
 
-            learned_drift = model.drift(t, x)
+                std = g * (np.abs(dt)) ** (1 / 2)
 
-            std = g * (np.abs(dt)) ** (1 / 2)
-
-            x = x + dt * (2*learned_drift + self.sde.drift(t,x)) + std * torch.randn_like(x)
+                x = x + dt * (2*learned_drift + self.sde.drift(t,x)) + std * torch.randn_like(x)
             x = x.detach()
         
         img = (x * 127.5 + 128).clip(0, 255).to(torch.uint8)
         return img
-
-
 
 
     def forward(
@@ -378,7 +365,8 @@ class RTBModel(nn.Module):
             x_1=None,
             save_traj=False,
             prior_sample=False,
-            time_discretisation='uniform' #uniform/random
+            time_discretisation='uniform',
+            ode=False
     ):
         """
         An Euler-Maruyama integration of the model SDE with GFN for RTB
@@ -401,6 +389,7 @@ class RTBModel(nn.Module):
             t = torch.ones(B).to(self.device) 
         else:
             x = self.sde.prior(D).sample([B]).to(self.device)
+            x_0 = x
             t = torch.zeros(B).to(self.device) + self.sde.epsilon
 
         # assume x is gaussian noise
@@ -409,7 +398,7 @@ class RTBModel(nn.Module):
 
         logpf_posterior = 0*normal_dist.log_prob(x).sum(tuple(range(1, len(x.shape)))).to(self.device)
         logpb = 0*normal_dist.log_prob(x).sum(tuple(range(1, len(x.shape)))).to(self.device)#torch.zeros_like(logpf_posterior)
-        dt = 1/(steps) - self.sde.epsilon/(steps-1)
+        dt = 1/(steps+1)
         #####
         if save_traj:
             traj = [x.clone()]
@@ -420,6 +409,10 @@ class RTBModel(nn.Module):
                 f"| scale ~ {x.std().item():.1e}")
             
             # back-sampling
+            
+
+
+            
             if backward:
                 g = self.sde.diffusion(t, x)
                 std = g * (np.abs(dt)) ** (1 / 2)
@@ -433,49 +426,68 @@ class RTBModel(nn.Module):
                 continue # continue instead of break because it works for forward and backward
             g = self.sde.diffusion(t, x)
 
+            # Euler intergration: x = x + v(x) * dt + g * dW
+            if ode:
+                x_mean_posterior = x + (self.posterior_ratio * self.model(t, x) + (1-self.posterior_ratio)*self.prior_model.drift(t, x)) * dt
+                x = x_mean_posterior
+            # Equivalent SDE that has the same marginal as the ODE
+            # x = (2 * v(x) - kappa(x) * x) * dt + g * dW
+            else:
 
-            posterior_drift =  2*self.model(t, x) + self.sde.drift(t, x)
+                posterior_drift = 2*(self.posterior_ratio * self.model(t, x) + (1-self.posterior_ratio) * self.prior_model.drift(t, x).detach()) + self.sde.drift(t, x)
+
+                f_posterior = posterior_drift
+                x_mean_posterior = x + f_posterior * dt # * (-1.0 if backward else 1.0)
             
-            f_posterior = posterior_drift
-            # compute parameters for denoising step (wrt posterior)
-            x_mean_posterior = x + f_posterior * dt # * (-1.0 if backward else 1.0)
-            std = g * (np.abs(dt)) ** (1 / 2)
+            
+                std = g * (np.abs(dt)) ** (1 / 2)
 
-            # compute step
-            if prior_sample and not backward:
-                x = x + (2*self.prior_model.drift(t, x) + self.sde.drift(t, x)) * dt + std * torch.randn_like(x)
-            elif not backward:
-                x = x_mean_posterior + std * torch.randn_like(x)
+                # compute step
+                if prior_sample and not backward:
+                    x = x + (2*self.prior_model.drift(t, x) + self.sde.drift(t, x)) * dt + std * torch.randn_like(x)
+                elif not backward:
+                    x = x_mean_posterior + std * torch.randn_like(x)
             x = x.detach()
             
-
-            if backward:
-                pb_drift = (2*self.prior_model.drift(t, x) + self.sde.drift(t, x))
-                x_mean_pb = x + pb_drift * (dt)
+            if ode:
+                x_mean_pb = x_prev + self.prior_model.drift(t, x) * dt
             else:
-                pb_drift = (2*self.prior_model.drift(t,x) + self.sde.drift(t, x))
-                x_mean_pb = x_prev + pb_drift * (dt)
-            #x_mean_pb = x_prev + pb_drift * (dt)
+                if backward:
+                    pb_drift = (2*self.prior_model.drift(t, x) + self.sde.drift(t, x))
+                    x_mean_pb = x + pb_drift * (dt)
+                else:
+                    pb_drift = (2*self.prior_model.drift(t,x) + self.sde.drift(t, x))
+                    x_mean_pb = x_prev + pb_drift * (dt)
+            
             pb_std = g * (np.abs(dt)) ** (1 / 2)
 
             if save_traj:
                 traj.append(x.clone())
-                
-            pf_post_dist = torch.distributions.Normal(x_mean_posterior, std)
-            pb_dist = torch.distributions.Normal(x_mean_pb, pb_std)
 
+
+            if ode:
+                # x_0 ~ N(0, 1), x_1 = ODE(x_0), logpf(x_1) = N(0, 1)
+                # logpb = log p(x_0|x_1) = 0, because x_1 -> x_0 is deterministic
+                logpf_posterior = torch.distributions.Normal(torch.zeros_like(x_0), torch.ones_like(x_0)).log_prob(x_0).sum(tuple(range(1, len(x.shape))))
+                logpb = torch.zeros_like(logpf_posterior)
+            
+
+            else:
             # compute log-likelihoods of reached pos wrt to prior & posterior models
             #logpb += pb_dist.log_prob(x_prev).sum(tuple(range(1, len(x.shape))))
-            if backward:
-                logpb += pb_dist.log_prob(x_prev).sum(tuple(range(1, len(x.shape))))
-                logpf_posterior += pf_post_dist.log_prob(x_prev).sum(tuple(range(1, len(x.shape))))
-            else:
-                logpb += pb_dist.log_prob(x).sum(tuple(range(1, len(x.shape))))
-                logpf_posterior += pf_post_dist.log_prob(x).sum(tuple(range(1, len(x.shape))))
+                pf_post_dist = torch.distributions.Normal(x_mean_posterior, std)
+                pb_dist = torch.distributions.Normal(x_mean_pb, pb_std)
+                if backward:
+                    logpb += pb_dist.log_prob(x_prev).sum(tuple(range(1, len(x.shape))))
+                    logpf_posterior += pf_post_dist.log_prob(x_prev).sum(tuple(range(1, len(x.shape))))
+                else:
+                    logpb += pb_dist.log_prob(x).sum(tuple(range(1, len(x.shape))))
+                    logpf_posterior += pf_post_dist.log_prob(x).sum(tuple(range(1, len(x.shape))))
 
-            if torch.any(torch.isnan(x)):
-                print("Diffusion is not stable, NaN were produced. Stopped sampling.")
-                break
+                if torch.any(torch.isnan(x)):
+                    print("Diffusion is not stable, NaN were produced. Stopped sampling.")
+                    break
+
         if backward:
             traj = list(reversed(traj))
         logs = {
@@ -509,7 +521,7 @@ class RTBModel(nn.Module):
         traj_batch = batch_size // traj[0].shape[0]
 
         steps = len(traj) - 1
-        timesteps = np.linspace(0 + self.sde.epsilon, 1 - self.sde.epsilon, steps + 1)
+        timesteps = np.linspace(1, 0, steps + 1)
 
         if likelihood_score_fn is None:
             likelihood_score_fn = lambda t, x: 0.
@@ -519,15 +531,12 @@ class RTBModel(nn.Module):
             timesteps = np.flip(timesteps)
         else:
             x = traj[0].to(self.device)
+            # timesteps 0 -> 1
+            #timesteps = np.flip(timesteps)
 
-        no_grad_steps = random.sample(range(steps), int(steps * 0.0))  # Sample detach_freq fraction of timesteps for no grad
+        no_grad_steps = random.sample(range(steps), int(steps * detach_freq))  # Sample detach_freq fraction of timesteps for no grad
 
-        # # assume x is gaussian noise
-        # normal_dist = torch.distributions.Normal(torch.zeros((B,) + tuple(D), device=self.device),
-        #                                          torch.ones((B,) + tuple(D), device=self.device))
-        #
-        # logpf_posterior = normal_dist.log_prob(x).sum(tuple(range(1, len(x.shape)))).to(self.device)
-        # logpf_prior = normal_dist.log_prob(x).sum(tuple(range(1, len(x.shape)))).to(self.device)
+
 
         # we iterate through the traj
         steps = list(range(len(traj)))
@@ -545,14 +554,14 @@ class RTBModel(nn.Module):
             dts = []
             bs = 0  # this might be different than traj_batch
             for step in batch_steps:
-                if timesteps[step +1] < self.sde.epsilon:
+                if timesteps[step + 1] < self.sde.epsilon:
                     continue
-                t_.append(torch.full((x.shape[0],), timesteps[step + 1]).float())
-                dts.append(torch.full((x.shape[0],), timesteps[step + 1] - timesteps[step]).float())
+                t_.append(torch.full((x.shape[0],), 1 - timesteps[step + 1]).float())
+                dts.append(torch.full((x.shape[0],), - timesteps[step + 1] + timesteps[step]).float())
                 xs.append(traj[step])
                 xs_next.append(traj[step+1])
                 bs += 1
-    
+                
 
             if len(t_) == 0:
                 continue
@@ -562,12 +571,15 @@ class RTBModel(nn.Module):
             xs = torch.cat(xs, dim=0).to(self.device)
             xs_next = torch.cat(xs_next, dim=0).to(self.device)
 
+
             g = self.sde.diffusion(t_, xs).to(self.device)
+            
+            f_posterior = 2*((1-self.posterior_ratio)*self.prior_model.drift(t_[:,0,0,0], xs).detach() + self.posterior_ratio*self.model(t_[:,0,0,0], xs)) + self.sde.drift(t_, xs)
 
 
-            f_posterior = 2*self.model(t_[:,0,0,0], xs) + self.sde.drift(t_, xs)
+            #f_posterior = (2 * self.model(t_[:,0,0,0], xs)) + self.sde.drift(t_, xs)
 
-                        # compute parameters for denoising step (wrt posterior)
+            # compute parameters for denoising step (wrt posterior)
             x_mean_posterior = xs + f_posterior * dts
             std = g * (dts) ** (1 / 2)
 
@@ -584,6 +596,9 @@ class RTBModel(nn.Module):
             xs = xs.detach()
 
             # define distributions wrt posterior score model
+
+
+
             pf_post_dist = torch.distributions.Normal(x_mean_posterior, std)
 
             # compute log-likelihoods of reached pos wrt to posterior model

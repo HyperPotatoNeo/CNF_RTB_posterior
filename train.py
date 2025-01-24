@@ -5,7 +5,6 @@ import os
 from torchvision import datasets, transforms
 import rtb 
 import non_latent_rtb
-import memoryless_dpok
 import memoryless_am
 #import tb 
 import reward_models 
@@ -48,6 +47,9 @@ parser.add_argument('--inference', default='vpsde', type=str, help='Inference me
 
 # am: implementation not finished yet. dpok, nl_rtb: code review needed
 parser.add_argument('--method', default= 'rtb', type=str, help='Method for training', choices=['rtb', 'dpok', 'nl_rtb', 'am'])
+parser.add_argument('--detach_freq', default=0.8, type=float, help='Number of samples to backpropagate through')
+
+parser.add_argument('--posterior_ratio', default=0.2, type=float, help='Ratio of finetuning model for parameterizing drift')
 
 #parser.add_argument('--')
 
@@ -139,8 +141,7 @@ if not args.replay_buffer == 'none':
 
 # non-latent RTB is only implemented for CIFAR now.
 if args.method == 'nl_rtb' and 'cifar' in args.exp:
-    model = prior_models.CIFARModel(device = device,
-                                          num_inference_steps=20).get_prior_model().train()   
+    model = prior_models.CIFARModel(device = device).get_prior_model().train()   
     rtb_model = non_latent_rtb.RTBModel(
             device = device, 
             reward_model = reward_model,
@@ -161,35 +162,13 @@ if args.method == 'nl_rtb' and 'cifar' in args.exp:
             beta_end = args.beta_end,
             loss_batch_size = args.loss_batch_size,
             replay_buffer = replay_buffer,
-            posterior_architecture = posterior_architecture)
+            posterior_architecture = posterior_architecture,
+            detach_freq=args.detach_freq,
+            posterior_ratio=args.posterior_ratio)
 
-elif args.method == 'dpok' and 'cifar' in args.exp:
-    model = prior_models.CIFARModel(device = device,
-                                          num_inference_steps=20).get_prior_model().train()   
-    rtb_model = memoryless_dpok.RTBModel(
-                device = device, 
-                reward_model = reward_model,
-                prior_model = prior_model,
-                model = model,
-                in_shape = in_shape, 
-                reward_args = reward_args, 
-                id = id,
-                model_save_path = args.save_path,
-                langevin = args.langevin,
-                inference_type = args.inference,
-                tb = args.tb,
-                load_ckpt = args.load_ckpt,
-                load_ckpt_path = args.load_path,
-                entity = args.entity,
-                diffusion_steps = args.diffusion_steps, 
-                beta_start = args.beta_start, 
-                beta_end = args.beta_end,
-                loss_batch_size = args.loss_batch_size,
-                replay_buffer = replay_buffer,
-                posterior_architecture = posterior_architecture)
+
 elif args.method == 'am' and 'cifar' in args.exp:
-    model = prior_models.CIFARModel(device = device,
-                                          num_inference_steps=20).get_prior_model().train()   
+    model = prior_models.CIFARModel(device = device).get_prior_model().train()   
     rtb_model = memoryless_am.RTBModel(
                 device = device, 
                 reward_model = reward_model,
@@ -210,7 +189,8 @@ elif args.method == 'am' and 'cifar' in args.exp:
                 beta_end = args.beta_end,
                 loss_batch_size = args.loss_batch_size,
                 replay_buffer = replay_buffer,
-                posterior_architecture = posterior_architecture)
+                posterior_architecture = posterior_architecture,
+                detach_freq=args.detach_freq)
 
 
 else:
