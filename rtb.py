@@ -1130,7 +1130,9 @@ class RTBModel(nn.Module):
 
                 if 'cifar' in exp:
                     print('COMPUTING FID:')
-                    generated_images_dir = 'fid/' + exp + '_cifar10_class_' + str(class_label)
+                    generated_images_distilled_dir = 'fid/' + exp + '_cifar10_class_' + str(class_label)
+                    generated_images_ode_dir = 'fid/' + exp + '_cifar10_class_' + str(class_label)
+                    generated_images_sde_dir = 'fid/' + exp + '_cifar10_class_' + str(class_label)
                     true_images_dir = 'fid/cifar10_class_' + str(class_label)
                     for k in range(60):
                         with torch.no_grad():
@@ -1138,12 +1140,34 @@ class RTBModel(nn.Module):
                                 t=torch.zeros(100, device=self.device),
                                 x=self.sde.prior(D).sample([100]).to(self.device)
                             )
-                            img_fid = self.prior_model(x_distilled)
-                            for i, img_tensor in enumerate(img_fid):
+                            teacher_ode_logs = self.forward(
+                                shape=(B, *self.in_shape),
+                                steps=self.steps,
+                                ddim=True
+                            )
+                            teacher_sde_logs = self.forward(
+                                shape=(B, *self.in_shape),
+                                steps=self.steps,
+                                ddim=False
+                            )
+                            img_fid_distilled = self.prior_model(x_distilled)
+                            for i, img_tensor in enumerate(img_fid_distilled):
                                 img_pil = transforms.ToPILImage()(img_tensor)
-                                img_pil.save(os.path.join(generated_images_dir, f'{k * 100 + i}.png'))
-                    fid_score = fid.compute_fid(generated_images_dir, true_images_dir, num_workers=0)
-                    log_dict['fid'] = fid_score
+                                img_pil.save(os.path.join(generated_images_distilled_dir, f'{k * 100 + i}.png'))
+                            img_fid_ode = self.prior_model(teacher_ode_logs['x_mean_posterior'])
+                            for i, img_tensor in enumerate(img_fid_ode):
+                                img_pil = transforms.ToPILImage()(img_tensor)
+                                img_pil.save(os.path.join(generated_images_ode_dir, f'{k * 100 + i}.png'))
+                            img_fid_sde = self.prior_model(teacher_sde_logs['x_mean_posterior'])
+                            for i, img_tensor in enumerate(img_fid_sde):
+                                img_pil = transforms.ToPILImage()(img_tensor)
+                                img_pil.save(os.path.join(generated_images_sde_dir, f'{k * 100 + i}.png'))
+                    fid_score_distilled = fid.compute_fid(generated_images_distilled_dir, true_images_dir, num_workers=0)
+                    fid_score_ode = fid.compute_fid(generated_images_ode_dir, true_images_dir, num_workers=0)
+                    fid_score_sde = fid.compute_fid(generated_images_sde_dir, true_images_dir, num_workers=0)
+                    log_dict['fid_distilled'] = fid_score_distilled
+                    log_dict['fid_ode'] = fid_score_ode
+                    log_dict['fid_sde'] = fid_score_sde
 
                 os.makedirs(distilled_ckpt_path, exist_ok=True)
                 ckpt_filename = os.path.join(distilled_ckpt_path, f"distilled_checkpoint_{it}.pth")
