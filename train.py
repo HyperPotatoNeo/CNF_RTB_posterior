@@ -1,7 +1,8 @@
 import torch 
 import argparse
 from distutils.util import strtobool
-
+import os
+from torchvision import datasets, transforms
 import rtb 
 #import tb 
 import reward_models 
@@ -12,7 +13,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 parser = argparse.ArgumentParser()
 
-parser.add_argument('--exp', default="sd3_align", type=str, help='Experiment name', choices=['sd3_align', 'sd3_aes', 'cifar', 'gan_ffhq'])
+parser.add_argument('--exp', default="sd3_align", type=str, help='Experiment name', choices=['sd3_align', 'sd3_aes', 'cifar', 'gan_ffhq', 'gan_cifar', 'gan_cifar_improve'])
 parser.add_argument('--tb', default=False, type=strtobool, help='Whether to use tb (vs rtb)')
 parser.add_argument('--n_iters', default=50000, type=int, metavar='N', help='Number of training iterations')
 parser.add_argument('-bs', '--batch_size', type=int, default=64, help="Training Batch Size.")
@@ -59,9 +60,25 @@ if args.exp == "gan_ffhq":
     
     in_shape = (2, 16, 16)
     prior_model = prior_models.GAN_FFHQ_Prompt(device = device)
-    posterior_architecture = 'mlp'
+    #posterior_architecture = 'mlp'
     id = "gan_ffhq_" + args.reward_prompt
-
+    
+if args.exp == "gan_cifar_improve":
+    reward_model = reward_models.SNGANDiscriminatorReward(device = device)
+    reward_args = []
+    
+    in_shape = (2, 8, 8)
+    prior_model = prior_models.SNGANGenerator(device = device, sngan_improve = True)
+    id = "gan_cifar_improve"
+    
+if args.exp == "gan_cifar":
+    reward_model = reward_models.CIFARClassifier(device = device, target_class = args.target_class)
+    reward_args  = [args.target_class]
+    
+    in_shape = (2, 8, 8)
+    prior_model = prior_models.SNGANGenerator(device = device)
+    id = "gan_cifar"
+    
 if args.exp == "sd3_align":
     reward_model = reward_models.ImageRewardPrompt(device = device, prompt = args.reward_prompt)
     reward_args = [args.reward_prompt]
@@ -77,10 +94,10 @@ elif args.exp == "sd3_aes":
     reward_args = []
 
     in_shape = (16, 64 ,64)
-    prior_model = prior_models.StableDiffusion3(prompt = "", 
+    prior_model = prior_models.StableDiffusion3(prompt = args.prompt, 
                                                 num_inference_steps = 28, 
                                                 device = device)
-    id = "aes_no_prompt"
+    id = "aes_" + args.prompt
 
 elif args.exp == "cifar":
 
@@ -91,6 +108,20 @@ elif args.exp == "cifar":
                                           num_inference_steps=20) 
     id = "cifar_target_class_" + str(args.target_class)
 
+if 'cifar' in args.exp and args.compute_fid:
+    transform = transforms.Compose([transforms.ToTensor()])
+    train_dataset = datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
+    class_label = args.target_class
+    output_dir = 'fid/cifar10_class_' + str(class_label)
+    os.makedirs(output_dir, exist_ok=True)
+    generated_images_dir = 'fid/' + args.exp + '_cifar10_class_' + str(class_label)
+    os.makedirs(generated_images_dir, exist_ok=True)
+
+    # Filter and save images of class
+    for i, (img, label) in enumerate(train_dataset):
+        if label == class_label:
+            img = transforms.ToPILImage()(img)
+            img.save(os.path.join(output_dir, f'{i}.png'))
 
 if args.tb:
     print("Training with TB")
@@ -124,4 +155,4 @@ rtb_model = rtb.RTBModel(
 if args.langevin:
     rtb_model.pretrain_trainable_reward(n_iters = 20, batch_size = args.batch_size, learning_rate = args.lr, wandb_track = False) #args.wandb_track)
 
-rtb_model.finetune(shape=(args.batch_size, *in_shape), n_iters = args.n_iters, wandb_track=args.wandb_track, learning_rate=args.lr, prior_sample_prob=args.prior_sample_prob, replay_buffer_prob=args.replay_buffer_prob, anneal=args.anneal, anneal_steps=args.anneal_steps)
+rtb_model.finetune(shape=(args.batch_size, *in_shape), n_iters = args.n_iters, wandb_track=args.wandb_track, learning_rate=args.lr, prior_sample_prob=args.prior_sample_prob, replay_buffer_prob=args.replay_buffer_prob, anneal=args.anneal, anneal_steps=args.anneal_steps, exp=args.exp, compute_fid=args.compute_fid, class_label=args.target_class)

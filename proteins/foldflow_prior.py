@@ -4,11 +4,8 @@ sys.path.append('..')
 import os
 import subprocess 
 import numpy as np
-import pandas as pd 
+import pandas as pd
 import torch
-from einops import rearrange
-import matplotlib.pyplot as plt
-from tqdm.auto import tqdm
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -19,7 +16,7 @@ import yaml
 
 import tree
 from typing import Dict, Optional
-import esm 
+import esm
 import GPUtil
 
 from biotite.sequence.io import fasta
@@ -53,7 +50,18 @@ def get_device(_infer_conf):
             device = f"cuda:{_infer_conf.gpu_id}"
     else:
         device = "cpu"
-    return device 
+    return device
+
+class InferConf:
+    def __init__(self, gpu_id=None):
+        self.gpu_id = gpu_id
+
+# Create a config object
+_infer_conf = InferConf(gpu_id=None)  # or specify a GPU id, e.g., gpu_id=0
+
+# Retrieve the appropriate device
+device = get_device(_infer_conf)
+
 
 class FoldFlowModel():
     def __init__(self, device, num_steps = 50):
@@ -386,7 +394,7 @@ class FoldFlowModel():
 
 
 def main():
-    flow_prior = FoldFlowModel(device = "cuda:0", num_steps = 50)
+    flow_prior = FoldFlowModel(device = device, num_steps=50)
 
     print("Loaded!")
 
