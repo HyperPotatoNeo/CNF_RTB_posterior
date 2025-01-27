@@ -13,7 +13,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 parser = argparse.ArgumentParser()
 
-parser.add_argument('--exp', default="sd3_align", type=str, help='Experiment name', choices=['sd3_align', 'sd3_aes', 'cifar', 'gan_ffhq', 'gan_cifar', 'gan_cifar_improve'])
+parser.add_argument('--exp', default="sd3_align", type=str, help='Experiment name', choices=['sd3_align', 'sd3_aes', 'cifar', 'gan_ffhq', 'nvae_ffhq', 'gan_cifar', 'nvae_cifar', 'gan_cifar_improve'])
 parser.add_argument('--tb', default=False, type=strtobool, help='Whether to use tb (vs rtb)')
 parser.add_argument('--n_iters', default=50000, type=int, metavar='N', help='Number of training iterations')
 parser.add_argument('-bs', '--batch_size', type=int, default=64, help="Training Batch Size.")
@@ -63,6 +63,15 @@ if args.exp == "gan_ffhq":
     #posterior_architecture = 'mlp'
     id = "gan_ffhq_" + args.reward_prompt
     
+if args.exp == 'nvae_ffhq':
+    reward_model = reward_models.ImageRewardPrompt(device = device, prompt = args.reward_prompt)
+    reward_args = [args.reward_prompt]
+    
+    in_shape = (80, 8, 8)
+    prior_model = prior_models.NVAE_FFHQ_Prompt(checkpoint = 'checkpoint-ffhq.pt', n_z = 4, temp = 0.5, device = device)
+    #posterior_architecture = 'mlp'
+    id = "nvae_ffhq_" + args.reward_prompt
+    
 if args.exp == "gan_cifar_improve":
     reward_model = reward_models.SNGANDiscriminatorReward(device = device)
     reward_args = []
@@ -78,6 +87,14 @@ if args.exp == "gan_cifar":
     in_shape = (2, 8, 8)
     prior_model = prior_models.SNGANGenerator(device = device)
     id = "gan_cifar"
+    
+if args.exp == "nvae_cifar":
+    reward_model = reward_models.CIFARClassifier(device = device, target_class = args.target_class)
+    reward_args  = [args.target_class]
+    
+    in_shape = (200, 16, 16)
+    prior_model = prior_models.NVAE_FFHQ_Prompt(checkpoint = 'checkpoint-cifar.pt', n_z = 10, temp = 0.7, device = device)
+    id = "nvae_cifar"
     
 if args.exp == "sd3_align":
     reward_model = reward_models.ImageRewardPrompt(device = device, prompt = args.reward_prompt)
@@ -105,7 +122,7 @@ elif args.exp == "cifar":
     reward_args  = [args.target_class]
     in_shape  = (3, 32, 32)
     prior_model = prior_models.CIFARModel(device = device,
-                                          num_inference_steps=20) 
+                                          num_inference_steps=45) 
     id = "cifar_target_class_" + str(args.target_class)
 
 if 'cifar' in args.exp and args.compute_fid:

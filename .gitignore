@@ -1,1 +1,2 @@
 cifar10_models/state_dicts/*
+NVAE/*.pt

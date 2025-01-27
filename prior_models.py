@@ -1,6 +1,7 @@
 import os
 import types 
 import torch
+import torch.distributed as dist
 from diffusers import StableDiffusion3Pipeline
 from diffusers.schedulers import EulerAncestralDiscreteScheduler
 from huggingface_hub import login
@@ -9,6 +10,8 @@ import numpy as np
 #import GAN.stylegan3.dnnlib as dnnlib
 #import GAN.stylegan3.legacy as legacy
 #from GAN.stylegan3.torch_utils import misc
+from NVAE.model import AutoEncoder
+import NVAE.utils as utils
 from sngan_cifar10.sngan_cifar10 import Generator, SNGANConfig 
 import PIL.Image
 from typing import List, Optional, Tuple, Union
@@ -62,6 +65,69 @@ class MLP(torch.nn.Module):
         if embedding_dim % 2 == 1:
             emb = torch.nn.functional.pad(emb, (0, 1))
         return emb
+
+def set_bn(model, bn_eval_mode, num_samples=1, t=1.0, iter=100):
+    if bn_eval_mode:
+        model.eval()
+    else:
+        model.train()
+        for i in range(iter):
+            if i % 10 == 0:
+                print('setting BN statistics iter %d out of %d' % (i+1, iter))
+            model.sample(num_samples, t)
+        model.eval()
+
+class NVAE_FFHQ_Prompt():
+    def __init__(self, checkpoint, n_z, temp, device):
+        self.temp = temp
+        self.n_z = n_z
+        self.ckpt = checkpoint
+        checkpoint = torch.load('NVAE/' + checkpoint)
+        args = checkpoint['args']
+        if not hasattr(args, 'ada_groups'):
+            args.ada_groups = False
+        if not hasattr(args, 'min_groups_per_scale'):
+            args.min_groups_per_scale = 1
+        if not hasattr(args, 'num_mixture_dec'):
+            args.num_mixture_dec = 10
+        #if eval_args.batch_size > 0:
+        args.batch_size = 16#eval_args.batch_size
+        os.environ['MASTER_ADDR'] = '127.0.0.1'
+        os.environ['MASTER_PORT'] = '6020'
+        arch_instance = utils.get_arch_cells(args.arch_instance)
+        with torch.no_grad():
+            self.model = AutoEncoder(args, None, arch_instance).to(device)
+            self.model.load_state_dict(checkpoint['state_dict'], strict=False)
+            bn_eval_mode = False
+            dist.init_process_group(backend='nccl', init_method='env://', rank=0, world_size=1)
+            set_bn(self.model, bn_eval_mode, num_samples=16, t=temp, iter=500)
+            dist.destroy_process_group()
+            print('BN done')
+            #test sampling
+            #set_bn(self.model, bn_eval_mode, num_samples=16, t=0.6, iter=500)
+            #logits = self.model.sample(32, 0.6)
+            #output = self.model.decoder_output(logits)
+            #output_img = output.mean if isinstance(output, torch.distributions.bernoulli.Bernoulli) \
+            #    else output.sample()
+        #img = (output_img.permute(0, 2, 3, 1) * 255).clamp(0, 255).to(torch.uint8)
+        #img = img[..., [1, 2, 0]]
+        #pil_images = [PIL.Image.fromarray(img[i].detach().cpu().numpy()) for i in range(img.shape[0])]
+        #for i, img_tensor in enumerate(pil_images):
+        #    img_tensor.save(os.path.join('nvae_test_img', f'{i}.png'))
+
+    def __call__(self, x):
+        with torch.no_grad():
+            logits = self.model.sample_z_post(x.shape[0], self.temp, x, self.n_z)
+            output = self.model.decoder_output(logits)
+            output_img = output.mean if isinstance(output, torch.distributions.bernoulli.Bernoulli) \
+                else output.sample()
+            if 'cifar' in self.ckpt:
+                img = (output_img*255).clamp(0, 255).to(torch.uint8)
+            else:
+                img = (output_img.permute(0, 2, 3, 1) * 255).clamp(0, 255).to(torch.uint8)
+                img = [PIL.Image.fromarray(img[i].detach().cpu().numpy()) for i in range(img.shape[0])]
+        return img
+
 
 class GAN_FFHQ_Prompt():
     def __init__(self, device):
@@ -136,7 +202,7 @@ class StableDiffusion3():
 
 
 class CIFARModel():
-    def __init__(self, device, num_inference_steps = 20):
+    def __init__(self, device, num_inference_steps = 20, ot=False):
         
         self.num_inference_steps = num_inference_steps
         self.device = device
@@ -152,7 +218,10 @@ class CIFARModel():
             attention_resolutions="16",
             dropout=0.1,
         ).to(device)
-        model_ckpt = "models/cifar10/otcfm_cifar10_weights_step_400000.pt"
+        if ot:
+            model_ckpt = "models/cifar10/otcfm_cifar10_weights_step_400000.pt"
+        else:
+            model_ckpt = "models/cifar10/cfm_cifar10_weights_step_400000.pt"
         checkpoint = torch.load(model_ckpt, map_location=device)
 
         state_dict = checkpoint["ema_model"]
@@ -200,12 +269,12 @@ class SNGANGenerator():
         self.device = device
         args = SNGANConfig()
         self.prior_model = Generator(args).to(device)
-        if sngan_improve:
-            checkpoint = torch.load("./sngan_cifar10/checkpoint.pth")
-            self.prior_model.load_state_dict(checkpoint['gen_state_dict'])
-        else:
-            checkpoint = torch.load("./sngan_cifar10/sngan_cifar10.pth")
-            self.prior_model.load_state_dict(checkpoint)
+        #if sngan_improve:
+        #    checkpoint = torch.load("./sngan_cifar10/checkpoint.pth")
+        #    self.prior_model.load_state_dict(checkpoint['gen_state_dict'])
+        #else:
+        checkpoint = torch.load("./sngan_cifar10/sngan_cifar10.pth")
+        self.prior_model.load_state_dict(checkpoint)
         
     def __call__(self, x):
         x = x.view(-1, 128)
