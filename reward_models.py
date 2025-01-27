@@ -114,9 +114,8 @@ class AestheticPredictor():
             preprocessed = [self.clip_preprocess(image) for image in img]
             img = torch.stack(preprocessed).to(self.device)
             im_feat = self.clip_model.encode_image(img)
-            im_emb_arr = self.normalized(im_feat.cpu().detach().numpy())
-
-            prediction = self.model(torch.from_numpy(im_emb_arr).to(self.device).type(torch.cuda.FloatTensor))
+            im_emb_arr = im_feat / torch.linalg.vector_norm(im_feat, dim=-1, keepdim=True)
+            prediction = self.model(im_emb_arr.float())
         return prediction[:,0]
 
 

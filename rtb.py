@@ -12,10 +12,11 @@ from prior_models import MLP
 from cleanfid import fid
 import torchvision.utils as vutils
 import torchvision.transforms as tf
+import matplotlib.pyplot as plt
 
 from sde import VPSDE, DDPM
 import reward_models
-import utils
+import rtb_utils as utils
 
 class RTBModel(nn.Module):
     def __init__(self, 
@@ -50,7 +51,7 @@ class RTBModel(nn.Module):
         self.sde_type = self.sde.sde_type
 
         # load distilled version of the model if we are given a path
-        if os.path.exists(distilled_model_path):
+        if distilled_model_path is not None and os.path.exists(distilled_model_path):
             self.distilled_model = UNetModelWrapper(
                 dim=self.in_shape,
                 num_res_blocks=2,
@@ -352,10 +353,40 @@ class RTBModel(nn.Module):
             }
             wandb.config.update(hyperparams)
             with torch.no_grad():
-                x = torch.randn(10, *self.in_shape, device=self.device)
+                num_log = 25 #if 'cifar' in exp else 10
+                x = torch.randn(num_log, *self.in_shape, device=self.device)
                 img = self.prior_model(x)
                 prior_reward = self.reward_model(img, *self.reward_args)
-            wandb.log({"prior_samples": [wandb.Image(img[k], caption = prior_reward[k]) for k in range(len(img))]})
+            log_dict = {"prior_reward": prior_reward.mean(),"prior_samples": [wandb.Image(img[k], caption = prior_reward[k]) for k in range(len(img))]}
+            if 'cifar' in exp:
+                if 'gan' in exp:
+                    title = 'SN-GAN Prior'
+                else:
+                    title = 'Flow Prior'
+                grid = vutils.make_grid(img, nrow=5, padding=1)
+                # The grid is of shape (3, H, W). We need to permute for matplotlib.
+                plt.figure(figsize=(8, 8))
+                plt.imshow(grid.permute(1, 2, 0).cpu())
+                plt.axis('off')
+                plt.title(title, fontsize=20)
+                log_dict['prior_grid'] = wandb.Image(plt)
+                plt.close()
+            wandb.log(log_dict)
+            
+        if 'sd3' in exp:
+            print('SAVING IMAGES:')
+            generated_images_dir = self.model_save_path + run_name + '/' + 'prior_images'
+            os.makedirs(generated_images_dir, exist_ok=True)
+            for k in range(10):
+                with torch.no_grad():
+                    logs = self.forward(
+                            shape=(10, *D),
+                            steps=self.steps
+                            )
+                    x = logs['x_mean_posterior']
+                    img_x = self.prior_model(x)
+                for i, img_tensor in enumerate(img_x):
+                    img_tensor.save(os.path.join(generated_images_dir, f'{k*10 + i}.png'))
             
         for it in range(load_it, n_iters):
             prior_traj = False
@@ -385,14 +416,15 @@ class RTBModel(nn.Module):
                     wandb.log({"loss": loss.item(), "logZ": self.logZ.detach().cpu().numpy(), "log_r": logr.item(), "epoch": it})
                 else:
                     with torch.no_grad():
+                        num_log = 25 #if 'cifar' in exp else 10
                         if self.sde_type == 'vpsde':
                             logs = self.forward(
-                                shape=(10, *D),
+                                shape=(num_log, *D),
                                 steps=self.steps
                             )
                         elif self.sde_type == 'ddpm':
                             logs = self.forward_ddpm(
-                                shape=(10, *D),
+                                shape=(num_log, *D),
                                 steps=self.steps
                             )
 
@@ -402,14 +434,45 @@ class RTBModel(nn.Module):
                         if self.langevin:
                             log_dict = {"prior_samples": [wandb.Image(img[k], caption = "logR(x1) = {}, TrainlogR(z) = {}".format(prior_reward[k], trained_reward[k])) for k in range(len(img))]}
                         else:
-                            log_dict = {"loss": loss.item(), "logZ": self.logZ.detach().cpu().numpy(), "log_r": logr.item(), "epoch": it,
+                            log_dict = {"posterior_reward": post_reward.mean(), "loss": loss.item(), "logZ": self.logZ.detach().cpu().numpy(), "log_r": logr.item(), "epoch": it,
                                    "posterior_samples": [wandb.Image(img[k], caption=post_reward[k]) for k in range(len(img))]}
+                        if 'cifar' in exp:
+                            if 'gan' in exp:
+                                title = 'SN-GAN Posterior (Bird)'
+                            else:
+                                title = 'Flow Posterior (Frog)'
+                            grid = vutils.make_grid(img, nrow=5, padding=1)
+                            # The grid is of shape (3, H, W). We need to permute for matplotlib.
+                            plt.figure(figsize=(8, 8))
+                            plt.imshow(grid.permute(1, 2, 0).cpu())
+                            plt.axis('off')
+                            plt.title(title, fontsize=20)
+                            log_dict['posterior_grid'] = wandb.Image(plt)
+                            plt.close()
+                        
+                        if it%500 == 0 and it > 0 and 'sd3' in exp:
+                            print('SAVING IMAGES:')
+                            generated_images_dir = self.model_save_path + run_name + '/' + 'posterior_images'
+                            os.makedirs(generated_images_dir, exist_ok=True)
+                            for k in range(10):
+                                with torch.no_grad():
+                                    logs = self.forward(
+                                            shape=(10, *D),
+                                            steps=self.steps
+                                            )
+                                    x = logs['x_mean_posterior']
+                                    img_x = self.prior_model(x)
+                                for i, img_tensor in enumerate(img_x):
+                                    img_tensor.save(os.path.join(generated_images_dir, f'{k*10 + i}.png'))
 
                         if it%1000 == 0 and 'cifar' in exp and compute_fid:# and it>0:
                             print('COMPUTING FID:')
+                            if 'improve' in exp:
+                                class_label = 20
                             generated_images_dir = 'fid/' + exp + '_cifar10_class_' + str(class_label)
                             true_images_dir = 'fid/cifar10_class_' + str(class_label)
-                            for k in range(60):
+                            K = 600 if 'improve' in exp else 60
+                            for k in range(K):
                                 with torch.no_grad():
                                     logs = self.forward(
                                         shape=(100, *D),

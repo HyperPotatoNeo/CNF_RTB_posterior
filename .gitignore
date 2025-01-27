@@ -1,2 +1,3 @@
 cifar10_models/state_dicts/*
 wandb/*
+NVAE/*.pt
