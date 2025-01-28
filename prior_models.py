@@ -7,10 +7,10 @@ from huggingface_hub import login
 import numpy as np
 import dnnlib
 # GAN FFHQ
-#import GAN.stylegan3.dnnlib as dnnlib
-#import GAN.stylegan3.legacy as legacy
-#from GAN.stylegan3.torch_utils import misc
-# from sngan_cifar10.sngan_cifar10 import Generator, SNGANConfig
+import GAN.stylegan3.dnnlib as dnnlib
+import GAN.stylegan3.legacy as legacy
+from GAN.stylegan3.torch_utils import misc
+from sngan_cifar10.sngan_cifar10 import Generator, SNGANConfig
 import PIL.Image
 from typing import List, Optional, Tuple, Union
 
