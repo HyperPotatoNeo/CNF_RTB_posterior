@@ -5,6 +5,7 @@ from diffusers import StableDiffusion3Pipeline
 from diffusers.schedulers import EulerAncestralDiscreteScheduler
 from huggingface_hub import login
 import numpy as np
+import dnnlib
 # GAN FFHQ
 #import GAN.stylegan3.dnnlib as dnnlib
 #import GAN.stylegan3.legacy as legacy
