@@ -13,7 +13,7 @@ import torchvision.transforms as tf
 
 from sde import VPSDE, DDPM
 import reward_models
-import rtb_utils as utils
+import utils
 
 class RTBModel(nn.Module):
     def __init__(self, 
