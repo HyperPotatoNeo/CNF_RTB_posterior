@@ -44,7 +44,18 @@ export MASTER_ADDR="127.0.0.1"
 unset CUDA_VISIBLE_DEVICES
 
 # run the following line to run prior code -- note, the path assume you run the files from the "scripts" folder
-python ../distill.py --exp cifar --distilled_ckpt_path ./distilled/ \
-                     --teacher_ckpt_filename cifar_pretrained.pth \
-                     --teacher_ckpt_filename cifar_pretrained.pth \
+#python ../distill.py --exp cifar --distilled_ckpt_path ./distilled/ \
+#                     --teacher_ckpt_filename cifar_pretrained.pth \
+#                     --teacher_ckpt_path ./pretrained/ --wandb_track True
+
+# run the following line to run prior code -- note, the path assume you run the files from the "scripts" folder
+python ../distill.py --exp gan_ffhq --distilled_ckpt_path ./distilled/ \
+                     --teacher_ckpt_filename gan_an_old_man.pth \
                      --teacher_ckpt_path ./pretrained/ --wandb_track True
+
+
+## run the following line to run prior code -- note, the path assume you run the files from the "scripts" folder
+#python ../distill.py --exp sd3_align --distilled_ckpt_path ./distilled/ \
+#                     --teacher_ckpt_filename sd3_a_green_car.pth \
+#                     --prompt "A car" --reward_prompt "A green car"
+#                     --teacher_ckpt_path ./pretrained/ --wandb_track True
