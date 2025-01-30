@@ -37,7 +37,7 @@ parser.add_argument('--reward_prompt', type=str, default="An old man",
                     help='Prompt for reward model (defaults to args.prompt)')
 parser.add_argument('--target_class', type=int, default=1,
                     help='Target class for classifier-tuning methods')
-parser.add_argument('--diffusion_steps', type=int, default=45)
+parser.add_argument('--diffusion_steps', type=int, default=100)
 parser.add_argument('--wandb_track', default=False, type=strtobool,
                     help='Whether to track with wandb.')
 parser.add_argument('--entity', default=None, type=str,

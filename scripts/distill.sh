@@ -45,7 +45,7 @@ unset CUDA_VISIBLE_DEVICES
 
 # run the following line to run prior code -- note, the path assume you run the files from the "scripts" folder
 python ../distill.py --exp cifar --distilled_ckpt_path ./distilled/ --distill_iters 2600\
-                     --teacher_ckpt_filename $1.pth --target_class $1 \
+                     --teacher_ckpt_filename $1.pth --target_class $1 --diffusion_steps 25\
                      --teacher_ckpt_path ./pretrained/ --wandb_track True
 
 # run the following line to run prior code -- note, the path assume you run the files from the "scripts" folder
