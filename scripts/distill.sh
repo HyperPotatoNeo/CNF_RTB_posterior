@@ -59,3 +59,5 @@ python ../distill.py --exp cifar --distilled_ckpt_path ./distilled/ --distill_it
 #                     --teacher_ckpt_filename a_cat_and_a_dog.pth \
 #                     --prompt "A cat and a dog." --reward_prompt "A cat and a dog." \
 #                     --teacher_ckpt_path ./pretrained/ --wandb_track True
+
+
