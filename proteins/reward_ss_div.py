@@ -6,6 +6,9 @@ import tempfile
 
 import numpy as np 
 import torch 
+import pickle 
+
+import time 
 
 import mdtraj as md 
 from rdkit import Chem
@@ -32,53 +35,57 @@ from pymol import cmd
 from PIL import Image 
 
 
-class FoldClassifier2OLD():
-    def __init__(self, device):
-        self.device = device 
-        args, vars = parse_args()
-        self.cfg = load_config(args.config, vars)
+# get samples and save as WandB images
+def get_prot_image(samples):
+    B = samples["prot_traj"].shape[1]
 
-        #self.cfg = get_conf("./proteins/gearnet_edge_ieconv.yaml")
+    imgs = []
+
+    print("batch size: ", B)
+
+    for i in range(B):
+        sample = samples["prot_traj"][0, i, ...]
         
-        #self.cfg = load_config("./proteins/gearnet_edge_ieconv.yaml")
-        dataset = core.Configurable.load_config_dict(self.cfg.dataset)
-        self.solver, self.scheduler = build_downstream_solver(self.cfg, dataset)
+        pdb_str = prot_to_pdb(sample)
+        fname = write_pdb(pdb_str, save_path = "./temp.pdb")
+        
+        print(fname)
 
-        self.solver.model = self.solver.model.to(self.device)
-        print("self.solver: ", self.solver)
-        print("self.solver.model (syn with task): ", self.solver.model)
+        # if fname exists
+        if os.path.exists(fname):
+            cmd.load(fname)
 
-        #self.task = core.Configurable.load_config_dict(self.cfg.task)
+        cmd.show("cartoon")               # Show cartoon representation
 
+        # highlight secondary structures
+        # First calculate secondary structure if not already assigned
+        cmd.dss()  # Determines secondary structure
 
-        #print("self.task: ", self.task.graph_construction_model)
-        #self.task.load()
-        #print("self.task: ", self.task)
+        # Color by secondary structure
+        cmd.color("blue", "ss h")        # Color helices blue
+        cmd.color("red", "ss s")     # Color sheets red
+        cmd.color("green", "ss l+''")   # Color loops green
 
-        self.transforms = transform 
-        #self.solver = core.Engine(self.task, train_set = None, valid_set =None, test_set = None, optimizer=None)
-    
-    def to_pdb(self, sample_out):
-        return prot_to_pdb(sample_out["prot_traj"][0])
+        cmd.show("sticks", "organic")    # Show ligands as sticks
+        cmd.zoom()                       # Zoom to molecule
 
-    def to_protein_ds(self, sample_pdb):
-        mol = Chem.MolFromPDBBlock(sample_pdb)
-        return data.Protein.from_molecule(mol, atom_feature="position", bond_feature="length", residue_feature="symbol")
+        cmd.png("temp.png", width=800, height=800)
+        
+        # Wait until the file exists
+        while (not os.path.exists("temp.png")) or (os.path.getsize("temp.png") == 0):
+            time.sleep(0.1)  # Sleep for a short duration before checking again
 
-    def __call__(self, sample):
-        #sample = sample.to(self.device)
-        print('sample device: ', sample['graph'].device)
-        print("model device: ", self.solver.model.device)
-        with torch.no_grad():
-            #sample = self.transforms(sample)
-            #batch = {"graph": sample}
-            #batch = self.transforms(batch)
-            #sample = self.to_protein_ds(sample)
-            pred = self.solver.model.predict(sample) #_and_target(sample)
-            
-        return pred
+        # load .png  
+        img = Image.open("temp.png")
+        
+        imgs.append(img)
 
-    
+        # Cleanup
+        os.remove("temp.png")
+        cmd.delete('all')
+
+    return imgs 
+
 def to_pdb(sample_out):
     traj_shape = sample_out["prot_traj"].shape
 
@@ -138,7 +145,8 @@ class FoldClassifier():
         self.device = device 
         
         self.protein_type = True 
-        
+        self.classifier_type = True 
+
         self.target_class = target_class
 
         self.graph_construction_model = layers.GraphConstruction(node_layers=[geometry.AlphaCarbonNode()], 
@@ -253,6 +261,76 @@ class FoldClassifier():
             print(f"Error: {e}")
             return None
 
+      # sample input must be directly from foldflow2 model output 
+    def pred_all_acc(self, sample):
+        #print("Sample: ", sample)
+
+        sample = self.to_pdb(sample)
+        sample = self.to_protein_ds_batch(sample)
+
+        none_mask = np.array([x is None for x in sample])       
+        filtered = [mol for mol in sample if mol is not None]
+
+        print("len samples: ", len(sample))
+
+        logr = torch.zeros(len(sample),).to(self.device)
+
+        #reward for none molecules
+        logr[none_mask] = -10.0 
+
+        # no valid molecules
+        if not filtered:
+            return logr 
+
+        #if sample is None:
+        #    print("Invalid molecule!, reward is -10!")
+        #    logr = -10.0*torch.ones((1,))
+        #    #print("Shape (invalid) logr: ", logr.shape)
+
+        #    return logr 
+
+        #sample = sample.to(self.device)
+        #print("sample (prepack): ", sample) 
+        filt_sample = data.Protein.pack(filtered).to(self.device)
+        filt_sample.view = 'residue'
+
+        with torch.no_grad():
+           
+            
+            #pred = self.task.predict(sample) #_and_target(sample)
+            
+            graph = self.task.graph_construction_model(filt_sample)
+            #print("Intermediate graph: ", graph)
+
+            output = self.task.model(graph, graph.node_feature.float())
+            #print("output: ", output)
+            #print("output graph feature shape: ", output['graph_feature'].shape)
+            #print("self.task output_dim: ", self.task.model.output_dim)
+
+            pred = self.task.mlp(output["graph_feature"])
+            #print("pred: ", pred)
+            #print("pred shape: ", pred.shape)
+
+            pred = torch.log_softmax(pred, dim = -1)
+            target_logit = pred[:, self.target_class]
+
+            label_pred = torch.argmax(pred, dim = -1)
+
+            num_correct = (label_pred == self.target_class).sum().item()
+        #print("Target logit: ", target_logit)
+        #print("Shape logr: ", target_logit.shape)
+        
+        #print("logr shape: ", logr.shape)
+
+        logr[~none_mask] = target_logit
+
+        acc = num_correct/len(sample)
+
+        print("Log reward: ", logr)
+        print("acc among samples: ", acc)
+        #print("logr shape: ", logr.shape)
+
+        return logr, pred , acc 
 
     # sample input must be directly from foldflow2 model output 
     def __call__(self, sample):
@@ -338,48 +416,7 @@ class FoldClassifier():
     
     # get samples and save as WandB images
     def get_prot_image(self, samples):
-        #print("sample shape: ", samples["prot_traj"].shape)
-        B = samples["prot_traj"].shape[1]
-
-        imgs = []
-
-        print("batch size: ", B)
-
-        for i in range(B):
-            sample = samples["prot_traj"][0, i, ...]
-            
-            pdb_str = prot_to_pdb(sample)
-            fname = write_pdb(pdb_str, save_path = "./temp.pdb")
-            
-            print(fname)
-            cmd.load(fname) #"./protein_2.pdb")
-
-            cmd.show("cartoon")               # Show cartoon representation
-
-            # highlight secondary structures
-            # First calculate secondary structure if not already assigned
-            cmd.dss()  # Determines secondary structure
-
-            # Color by secondary structure
-            cmd.color("blue", "ss h")        # Color helices blue
-            cmd.color("red", "ss s")     # Color sheets red
-            cmd.color("green", "ss l+''")   # Color loops green
-
-            cmd.show("sticks", "organic")    # Show ligands as sticks
-            cmd.zoom()                       # Zoom to molecule
-
-            cmd.png("temp.png", width=800, height=800)
-            
-            # load .png  
-            img = Image.open("temp.png")
-            
-            imgs.append(img)
-            
-            # Cleanup
-            os.remove("temp.png")
-            cmd.delete('all')
-
-        return imgs 
+        return get_prot_image(samples)
 
 # reward counting amount of helices in sampled protein
 class SheetPercentReward():
@@ -411,47 +448,7 @@ class SheetPercentReward():
     
     # get samples and save as WandB images
     def get_prot_image(self, samples):
-        B = samples["prot_traj"].shape[1]
-
-        imgs = []
-
-        print("batch size: ", B)
-
-        for i in range(B):
-            sample = samples["prot_traj"][0, i, ...]
-            
-            pdb_str = prot_to_pdb(sample)
-            fname = write_pdb(pdb_str, save_path = "./temp.pdb")
-            
-            print(fname)
-            cmd.load(fname) #"./protein_2.pdb")
-
-            cmd.show("cartoon")               # Show cartoon representation
-
-            # highlight secondary structures
-            # First calculate secondary structure if not already assigned
-            cmd.dss()  # Determines secondary structure
-
-            # Color by secondary structure
-            cmd.color("blue", "ss h")        # Color helices blue
-            cmd.color("red", "ss s")     # Color sheets red
-            cmd.color("green", "ss l+''")   # Color loops green
-
-            cmd.show("sticks", "organic")    # Show ligands as sticks
-            cmd.zoom()                       # Zoom to molecule
-
-            cmd.png("temp.png", width=800, height=800)
-            
-            # load .png  
-            img = Image.open("temp.png")
-            
-            imgs.append(img)
-
-            # Cleanup
-            os.remove("temp.png")
-            cmd.delete('all')
-
-        return imgs 
+        return get_prot_image(samples)
 
     def calc_ss_percentages(self, traj):
         """
@@ -491,9 +488,13 @@ class SheetPercentReward():
         # sample is sample_out 
         with torch.no_grad():
             for i, pdb_str in enumerate(pdb_str_list):
-                with open(f"./protein_{i}.pdb", "w") as f:
-                    f.write(pdb_str)
-                pdb_filename = "./protein_{}.pdb".format(i)
+                
+                #with open(f"./protein_{i}.pdb", "w") as f:
+                #    f.write(pdb_str)
+                # pdb_filename = "./protein_{}.pdb".format(i)
+
+                pdb_filename = write_pdb(pdb_str, save_path = f"./protein_{i}.pdb")
+
                 # Create temporary trajectory
                 traj = md.load_pdb(pdb_filename)
             
@@ -520,6 +521,171 @@ class SheetPercentReward():
         with torch.no_grad():
            percents = self.get_percents(sample)
            logr = torch.log(percents + self.eps)
+
+        print("Log reward: ", logr)
+        print("logr shape: ", logr.shape)
+
+        return logr
+    
+
+    
+# reward counting diversity in secondary structures
+class SSDivReward():
+    def __init__(self, device):
+        self.device = device
+        self.eps = 1e-5
+        self.protein_type = True 
+
+    def load_traj(self, pdb_path):
+        traj = md.load(pdb_path)
+        return traj
+    
+    # unused
+    def calc_mdtraj_metrics(self, traj):
+        
+        pdb_ss = md.compute_dssp(traj, simplified=True)
+        pdb_coil_percent = np.mean(pdb_ss == "C")
+        pdb_helix_percent = np.mean(pdb_ss == "H")
+        pdb_strand_percent = np.mean(pdb_ss == "E")
+        pdb_ss_percent = pdb_helix_percent + pdb_strand_percent
+        pdb_rg = md.compute_rg(traj)[0]
+        return {
+            "non_coil_percent": pdb_ss_percent,
+            "coil_percent": pdb_coil_percent,
+            "helix_percent": pdb_helix_percent,
+            "strand_percent": pdb_strand_percent,
+            "radius_of_gyration": pdb_rg,
+        }
+
+    
+    def save_samples(self, samples, save_path, it):
+        B = samples["prot_traj"].shape[1]
+
+        if not os.path.exists(save_path):
+            os.makedirs(save_path)
+
+        for i in range(B):
+            sample = samples["prot_traj"][0, i, ...]
+            
+            pdb_str = prot_to_pdb(sample)
+            fname = write_pdb(pdb_str, save_path = save_path + "rw_mcmc_it_{}_b_{}.pdb".format(it, i))
+            print(fname)
+        
+        with open(save_path + "sample_dict_rw_mcmc_it_{}.pkl".format(it), 'wb') as f:
+            pickle.dump(samples, f)
+        
+        return 
+
+    # get samples and save as WandB images
+    def get_prot_image(self, samples):
+        return get_prot_image(samples)
+
+    def calc_ss_percentages(self, traj):
+        """
+        Calculate secondary structure percentages from PDB string
+        
+        Args:
+            pdb_string: PDB format structure as string
+        
+        Returns:
+            dict with helix, sheet, and coil percentages
+        """
+        
+        # Calculate secondary structure
+        # Returns 'H' for helix, 'E' for sheet, 'C' for coil
+        ss = md.compute_dssp(traj, simplified=True)
+        
+        # Calculate percentages
+        total_residues = ss.shape[1]
+        helix_percent = np.mean(ss == 'H')
+        sheet_percent = np.mean(ss == 'E')
+        coil_percent = np.mean(ss == 'C')
+        
+        return {
+            'helix': helix_percent,
+            'sheet': sheet_percent,
+            'coil': coil_percent,
+            'structured': helix_percent + sheet_percent  # Total structured content
+        }
+
+
+    def get_percents(self, pdb_str_list, *args):
+        batch_size = len(pdb_str_list)
+        print("pdb batch size: ", batch_size)
+
+        reward = torch.zeros((batch_size,)).to(self.device)
+
+        #w_vec = torch.tensor([1., 4., 0.5]).to(self.device)
+        w_vec = torch.tensor([1., 2., 0.5]).to(self.device)
+        
+        # sample is sample_out 
+        with torch.no_grad():
+            for i, pdb_str in enumerate(pdb_str_list):
+                
+                #with open(f"./protein_{i}.pdb", "w") as f:
+                #    f.write(pdb_str)
+                #pdb_filename = "./protein_{}.pdb".format(i)
+                
+                pdb_filename = write_pdb(pdb_str, save_path = f"./protein_{i}.pdb")
+                
+                print("pdb_filename: ", pdb_filename)
+
+                while (not os.path.exists("./protein_{}.pdb".format(i))) or (os.path.getsize("./protein_{}.pdb".format(i)) == 0):
+                    time.sleep(0.1)
+                
+
+                # Create temporary trajectory
+                traj = md.load_pdb(pdb_filename)
+            
+                # Calculate percentages
+                ss_metrics = self.calc_ss_percentages(traj)
+            
+                # Convert to tensor
+                helix_percent = torch.tensor(ss_metrics["helix"]).to(self.device)
+                sheet_percent = torch.tensor(ss_metrics["sheet"]).to(self.device)
+                coil_percent = torch.tensor(ss_metrics["coil"]).to(self.device)
+                
+                #print("{} helix percent: {}".format(i, helix_percent))
+                #print("{} sheet percent: {}".format(i, sheet_percent))
+                #print("{} coil percent: {}".format(i, coil_percent))
+
+                prob_vec = torch.tensor([helix_percent, sheet_percent, coil_percent]).to(self.device)
+                prob_vec = prob_vec + 1e-10
+                prob_vec = prob_vec / prob_vec.sum()
+
+                # Compute entropy in a stable way
+                dist = torch.distributions.Categorical(probs=prob_vec)
+                entropy = dist.entropy()
+                reward[i] = (w_vec*prob_vec).sum(dim=-1) / (1.2 - entropy)  #helix_percent
+                
+                #print("{} reward: {}, entropy: {}".format(i, reward[i], entropy))
+                
+                #sheet_percents.append(sheet_percent)
+
+            return reward #torch.log(reward) #sheet_percents #, sheet_percents
+
+    def call_pdb_str(self, sample_pdb_str):
+        
+        with torch.no_grad():
+           percents = self.get_percents(sample_pdb_str)
+
+           # vals should be ~ 0 to -5 
+           #logr = 4.0 * (torch.log(percents + 1e-12) - 1.2)
+           logr = 6.0 * (torch.log(percents + 1e-12) - 2.5)#10.0* torch.log(percents + self.eps) - 25.0 
+
+        return logr
+
+      # sample input must be directly from foldflow2 model output 
+    def __call__(self, sample):
+
+        sample = to_pdb(sample)
+        
+        with torch.no_grad():
+           percents = self.get_percents(sample)
+
+           # vals should be ~ 0 to -5 
+           #logr = 4.0 * (torch.log(percents + 1e-12) - 1.2)
+           logr = 6.0 * (torch.log(percents + 1e-12) - 2.5)#10.0* torch.log(percents + self.eps) - 25.0 
 
         print("Log reward: ", logr)
         print("logr shape: ", logr.shape)

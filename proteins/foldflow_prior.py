@@ -347,30 +347,18 @@ class FoldFlowModel():
         return sample_out #tree.map_structure(lambda x: x[:, 0], sample_out)
     
     # with 7 dimensional rigids_tensor
-    def normalize_rigids(self, rigids_t, from_unif = False):
-        #x_true = self.so3_unif_prior(rigids_t.shape[1])['rigids_t'].unsqueeze(0)
-        
+    def normalize_rigids(self, rigids_t, from_unif = False, scale_trans = False):
         quats = rigids_t[..., :4]
-
-        #
-        # round to [-1, 1]
-        #quats = torch.clamp(quats, -1, 1)
-
-        #print("Pre normalization norm: ", torch.norm(quats, dim=-1))
 
         # normalize the norm to 1
         quats = quats / torch.norm(quats, dim = -1, keepdim=True)
 
         rigids_t[..., :4] = quats
 
-        # resample translations
-        # the translation coordinates are unscaled 
-        #rigids_t[..., 4:] = torch.randn_like(rigids_t[..., 4:])/0.1 #x_true[..., 4:] #torch.randn_like(rigids_t[..., 4:])
-
-        #if not from_unif:
-        #    rigids_t[..., 4:] = rigids_t[..., 4:]/0.1
-
-        #rigids_t[..., :4] = x_true[..., :4]
+        # correct the scale for translations
+        if scale_trans:
+            print("scaling the translations")
+            rigids_t[..., 4:] = rigids_t[..., 4:] / 0.1
 
         #rigids_t = x_true 
         return rigids_t

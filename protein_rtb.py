@@ -37,7 +37,8 @@ class ProteinRTBModel(nn.Module):
                  beta_start=1.0, 
                  beta_end=10.0,
                  loss_batch_size=64,
-                 replay_buffer=None):
+                 replay_buffer=None,
+                 load_pretrained_checkpoint_path="~/scratch/CNF_RTB_ckpts/DSM_unif_unet_typeprotein_foldflow_TEMP_classifier_r_len_64/checkpoint_13100.pth"):
         super().__init__()
 
         self.device = device
@@ -66,17 +67,20 @@ class ProteinRTBModel(nn.Module):
         self.tb = tb 
 
         # shape as (C, H, W), then reshape to in-shape (64, 7) when passing to prior model
-        self.gfn_shape = (7, 10, 10)
+        self.gfn_shape = (7, 8,8) #10, 10)
 
         # Posterior noise model
         self.logZ = torch.nn.Parameter(torch.tensor(0.).to(self.device))
 
         self.mlp_dim = self.gfn_shape[0]*self.gfn_shape[1]*self.gfn_shape[2]       
-        self.model = MLP(dim = self.mlp_dim, 
-                         out_shape = self.gfn_shape, 
-                         time_varying = True).to(self.device)
         
-        """
+        
+        #self.model = MLP(dim = self.mlp_dim, 
+        #                 out_shape = self.gfn_shape, 
+        #                 time_varying = True).to(self.device)
+        
+        self.mlp_type = True
+    
         self.model = UNetModelWrapper(
             dim = self.gfn_shape,
             num_res_blocks = 2,
@@ -87,7 +91,38 @@ class ProteinRTBModel(nn.Module):
             attention_resolutions = "16",
             dropout = 0.0,
         ).to(self.device)
+        
+        # for DSM pretraining 
         """
+        self.load_pretrained_ckpt_path = os.path.expanduser(load_pretrained_checkpoint_path)
+        checkpoint = torch.load(self.load_pretrained_ckpt_path)
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        print("DSM model loaded from: ", self.load_pretrained_ckpt_path)
+
+        # pretrained frozen model 
+        
+        self.ref_model = UNetModelWrapper(
+            dim = self.gfn_shape,
+            num_res_blocks = 2,
+            num_channels = 128,
+            channel_mult = [1, 2, 2, 2],
+            num_heads = 4,
+            num_head_channels = 64,
+            attention_resolutions = "16",
+            dropout = 0.0,
+        ).to(self.device)
+        
+        self.load_pretrained_ckpt_path = os.path.expanduser(load_pretrained_checkpoint_path)
+        checkpoint = torch.load(self.load_pretrained_ckpt_path)
+        self.ref_model.load_state_dict(checkpoint['model_state_dict'])
+        print("Reference DSM model loaded from: ", self.load_pretrained_ckpt_path)
+        
+        self.ref_model.eval() 
+        self.ref_model.requires_grad_ = False 
+        
+        """
+        
+        self.ref_proc = False #True 
 
         # Prior flow model pipeline
         self.prior_model = prior_model 
@@ -121,8 +156,25 @@ class ProteinRTBModel(nn.Module):
 
         # reshape x to gfn_shape
         x = x.permute(0, 2, 1).reshape(-1, *self.gfn_shape)
-        #print("model input shape: ", x.shape)
+
         model_out = self.model(t,x)
+        # reshape to in_shape [1, 64, 7]
+        model_out_shaped = model_out.permute(0, 3, 1, 2).reshape(-1, *self.in_shape)
+        #print("model out shape")
+        
+        return model_out_shaped
+    
+    # according to reference model 
+    def ref_model_and_shape(self, t, x):
+        # will be [B, N, 7]
+        #print("input x.shape: ", x.shape)
+
+        # reshape x to gfn_shape
+        x = x.permute(0, 2, 1).reshape(-1, *self.gfn_shape)
+
+        with torch.no_grad():
+            model_out = self.ref_model(t,x)
+        
         # reshape to in_shape [1, 64, 7]
         model_out_shaped = model_out.permute(0, 3, 1, 2).reshape(-1, *self.in_shape)
         #print("model out shape")
@@ -145,6 +197,21 @@ class ProteinRTBModel(nn.Module):
         filepath = savedir + 'checkpoint_'+str(epoch)+'.pth'
         torch.save(checkpoint, filepath)
         print(f"Checkpoint saved at {filepath}")
+
+    def load_checkpoint(self, model, optimizer):
+        if self.load_ckpt_path is None:
+            print("Checkpoint path not provided. Checkpoint not loaded.")
+            return model, optimizer
+        
+        checkpoint = torch.load(self.load_ckpt_path)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        print(f"Checkpoint loaded from {self.load_ckpt_path}")
+
+        # get iteration number (number before .pth)
+        it = int(self.load_ckpt_path.split('/')[-1].split('_')[-1].split('.')[0])
+        print("Epoch number: ", it)
+        return model, optimizer, it
 
     def load_checkpoint(self, model, optimizer):
         if self.load_ckpt_path is None:
@@ -257,9 +324,10 @@ class ProteinRTBModel(nn.Module):
     def prior_log_prob(self, x):
         return self.latent_prior.log_prob(x).sum(dim = tuple(range(1, len(x.shape))))
 
-    def log_reward(self, x, return_img=False):
+    def log_reward(self, x, from_prior = False, return_img=False):
         with torch.no_grad():
-            x = self.prior_model.normalize_rigids(x)
+            if not from_prior:
+               x = self.prior_model.normalize_rigids(x, scale_trans = (not self.ref_proc))
             
             img = self.prior_model(x)
             
@@ -277,7 +345,17 @@ class ProteinRTBModel(nn.Module):
 
         with torch.no_grad():
             # run whole trajectory, and get PFs
-            if self.sde_type == 'vpsde':
+            if self.sde_type == 'vpsde' and self.ref_proc:
+                print("In batched RTB doing REF PROC")
+                fwd_logs = self.forward_ref_proc(
+                    shape=shape,
+                    steps=self.steps,
+                    save_traj=True,  # save trajectory fwd
+                    prior_sample=prior_sample,
+                    x_1 = x_1,
+                    backward = rb_sample
+                )
+            elif self.sde_type == 'vpsde':
                 fwd_logs = self.forward(
                     shape=shape,
                     steps=self.steps,
@@ -286,6 +364,7 @@ class ProteinRTBModel(nn.Module):
                     x_1 = x_1,
                     backward = rb_sample
                 )
+            
             elif self.sde_type == 'ddpm':
                 fwd_logs = self.forward_ddpm(
                     shape=shape,
@@ -301,6 +380,11 @@ class ProteinRTBModel(nn.Module):
                 logr_x_prime = self.log_reward(x_mean_posterior)
 
             self.logZ.data = (-logpf_posterior + logpf_prior + self.beta*logr_x_prime).mean()
+
+            print("logpf_posterior: ", logpf_posterior.mean().item())
+            print("logpf_prior: ", logpf_prior.mean().item())
+            print("logr_x_prime: ", logr_x_prime.mean().item())
+            print("logZ: ", self.logZ.item())
 
             rtb_loss = 0.5 * (((logpf_posterior + self.logZ - logpf_prior - self.beta*logr_x_prime) ** 2) - learning_cutoff).relu()
 
@@ -331,10 +415,48 @@ class ProteinRTBModel(nn.Module):
 
         return rtb_loss.detach().mean(), logr_x_prime.mean()
     
+    def dsm_loss(self, x0, t):
+        B = x0.shape[0]
+        D = x0.shape[1:]
+
+        m,std = self.sde.marginal_prob_scalars(t)
+        noise = torch.randn_like(x0)
+        m = m.reshape((-1, *[1]*len(D)))
+        std = std.reshape((-1, *[1]*len(D)))
+
+        #print("x0 shape: ",x0.shape)
+        #print("m shape: ", m.shape)
+        #print("std shape: ", std.shape)
+
+        xt = m * x0  + std * noise 
+
+        # get model prediction 
+        dt = -1/self.steps 
+
+        m_t1, std_t1 = self.sde.marginal_prob_scalars(t + dt)
+        m_t1 = m_t1.reshape((-1, *[1]*len(D)))
+        
+        xt1_mean = m_t1 * x0
+
+        g = self.sde.diffusion(t, xt)
+
+        #xt_r = xt.permute(0, )        
+        posterior_drift = -self.sde.drift(t, xt) - (g ** 2) * (self.model_and_shape(t, xt)) / self.sde.sigma(t).view(-1, *[1]*len(D))
+        
+        f_posterior = posterior_drift
+        # compute parameters for denoising step (wrt posterior)
+        x_mean_posterior = xt + f_posterior * dt# * (-1.0 if backward else 1.0)
+        std = g * (np.abs(dt)) ** (1 / 2)
+
+        loss = ((xt1_mean - x_mean_posterior)**2 / std).mean() #.mean(dim=[1,2])
+
+        return loss         
+
+    # do denoising score matching to pretrain gfn
     def denoising_score_matching_unif(self, n_iters = 1000, learning_rate = 5e-5, clip=0.1, wandb_track = False):
         param_list = [{'params': self.model.parameters()}]
         optimizer = torch.optim.Adam(param_list, lr=learning_rate)
-        run_name = 'DSM_unif_' + self.id + '_sde_' + self.sde_type +'_steps_' + str(self.steps) + '_lr_' + str(learning_rate) 
+        run_name = 'DSM_unif_' + "unet_type" + self.id #+ '_sde_' + self.sde_type +'_steps_' + str(self.steps) + '_lr_' + str(learning_rate) 
         
         if wandb_track:
             wandb.init(
@@ -349,38 +471,82 @@ class ProteinRTBModel(nn.Module):
                 "dsm_unif": True
             }
             wandb.config.update(hyperparams)
-        B = 32
+        B = 64 #32
          
-        for it in range(n_iters):
+        if self.load_ckpt:
+            self.model, optimizer, load_it = self.load_checkpoint(self.model, optimizer)
+        else:
+            load_it = 0
+        
+        
+        for it in range(load_it, load_it+n_iters):
             optimizer.zero_grad()
 
             # sample uniform so3
-            x_list = []
-            for i in range(B):   
-                x = self.prior_model.so3_unif_prior(self.in_shape[0])['rigids_t_in']
-                x_list.append(x)
-            x = torch.stack(x_list)
+            x0 = self.prior_model.sample_prior(batch_size= B, sample_length=self.in_shape[0])
+            x0 = x0["rigids_t"].to(self.device)
 
-            # denoising score matching loss
-
+            #print('x0 shape: ', x0.shape)
+            #x0 = x0.permute(0, 2, 1).reshape(-1, *self.gfn_shape)
+            #x0 =x0.reshape((B, self.gfn_shape))
+            
             # sample random timestep 
             t = torch.rand(B).to(self.device) * self.sde.T
-
+            
             # compute drift
-            x.requires_grad = True
+            x0.requires_grad = True
 
+            # denoising score matching loss
+            loss = self.dsm_loss(x0, t)
 
-            #fwd_logs = self.forward(
-            #        shape=(32, *self.in_shape),
-            #        steps=self.steps,
-            #        save_traj=True,  # save trajectory fwd
-            #        prior_sample=False,
-            #        x_1 = False,
-            #        backward = False
-            #    )
+            loss.backward()
+            
+            if clip > 0:
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=clip)
+            
+            optimizer.step() 
+              
 
-            #diff_x = fwd_logs['x_mean_posterior'] 
-            return 
+            print("Iteration {}, Loss: {:.4f}".format(it, loss.item()))
+
+            if not it%100 == 0:
+                wandb.log({"loss": loss.item(),  "epoch": it})
+
+            if it%100 == 0:
+                if self.ref_proc:
+                    fwd_logs = self.forward_ref_proc(
+                        shape=(100, *self.in_shape),
+                        steps=20,
+                        save_traj=True,  # save trajectory fwd
+                        prior_sample=False,
+                        x_1 = None,
+                        backward = False
+                    )
+                else:
+                    fwd_logs = self.forward(
+                        shape=(100, *self.in_shape),
+                        steps=20,
+                        save_traj=True,  # save trajectory fwd
+                        prior_sample=False,
+                        x_1 = None,
+                        backward = False
+                    )
+                
+                model_samples = fwd_logs['x_mean_posterior']
+
+                w1, w2 = utils.wasserstein_dist_samples(model_samples.reshape(-1, 7), x0.reshape(-1, 7))
+
+                # get 
+                fig, true_trans_std, model_trans_std = utils.plot_so3_comparison(model_samples.reshape(-1, 7), x0.reshape(-1, 7))
+
+                wandb.log({"loss": loss.item(),  "wasserstein1": w1, "wasserstein2":w2, "epoch": it,
+                           "rotation comp fig": wandb.Image(fig), "translation true std": true_trans_std.mean().item(), "model trans std": model_trans_std.mean().item()})
+                
+                
+                # save model and optimizer state
+                self.save_checkpoint(self.model, optimizer, it, run_name)
+
+        return 
 
 
 
@@ -462,7 +628,12 @@ class ProteinRTBModel(nn.Module):
                     wandb.log({"loss": loss.item(), "logZ": self.logZ.detach().cpu().numpy(), "log_r": logr.item(), "epoch": it})
                 else:
                     with torch.no_grad():
-                        if self.sde_type == 'vpsde':
+                        if self.sde_type == 'vpsde' and self.ref_proc:
+                            logs = self.forward_ref_proc(
+                                shape=(num_test_samples, *D),
+                                steps = self.steps
+                            )
+                        elif self.sde_type == 'vpsde':
                             logs = self.forward(
                                 shape=(num_test_samples, *D),
                                 steps=self.steps
@@ -473,7 +644,7 @@ class ProteinRTBModel(nn.Module):
                                 steps=self.steps
                             )
 
-                        x = self.prior_model.normalize_rigids(logs['x_mean_posterior'])
+                        x = self.prior_model.normalize_rigids(logs['x_mean_posterior'], scale_trans = (not self.ref_proc))
                         img = self.prior_model(x)
                         post_reward = self.reward_model(img, *self.reward_args)
                         
@@ -487,9 +658,15 @@ class ProteinRTBModel(nn.Module):
                                 wandb.log({"loss": loss.item(), "logZ": self.logZ.detach().cpu().numpy(), "log_r": logr.item(), "epoch": it, 
                                    "posterior_samples": [wandb.Image(img[k], caption=post_reward[k]) for k in range(len(img))]})
                             else:
+                                
+                                if hasattr(self.reward_model, 'classifier_type'):
+                                    logr_, pred_all, acc = self.reward_model.pred_all_acc(img)
+                                else:
+                                    acc = -1.0
+
                                 imgs_pil = self.reward_model.get_prot_image(img)
                                 wandb.log({"loss": loss.item(), "logZ": self.logZ.detach().cpu().numpy(), "log_r": logr.item(), "epoch": it,
-                                           "posterior_samples":  [wandb.Image(imgs_pil[k], caption=post_reward[k]) for k in range(len(imgs_pil))] })
+                                           "posterior_samples":  [wandb.Image(imgs_pil[k], caption=post_reward[k]) for k in range(len(imgs_pil))], "acc": acc})
 
                         # save model and optimizer state
                         self.save_checkpoint(self.model, optimizer, it, run_name)
@@ -632,6 +809,137 @@ class ProteinRTBModel(nn.Module):
 
         return logs
     
+    def forward_ref_proc(
+            self,
+            shape,
+            steps,
+            condition: list=[],
+            likelihood_score_fn=None,
+            guidance_factor=0.,
+            detach_freq=0.0,
+            backward=False,
+            x_1=None,
+            save_traj=False,
+            prior_sample=False,
+            time_discretisation='uniform' #uniform/random
+    ):
+        """
+        An Euler-Maruyama integration of the model SDE with GFN for RTB, with the prior process being given by "ref_model" (assumed identical to GFN model paramterization)
+
+        shape: Shape of the tensor to sample (including batch size)
+        steps: Number of Euler-Maruyam steps to perform
+        likelihood_score_fn: Add an additional drift to the sampling for posterior sampling. Must have the signature f(t, x)
+        guidance_factor: Multiplicative factor for the likelihood drift
+        detach_freq: Fraction of steps on which not to train
+        """
+        print("USING REF_PROC")
+        
+        # if not isinstance(condition, (list, tuple)):
+        #     raise ValueError(f"condition must be a list or tuple or torch.Tensor, received {type(condition)}")
+        B, *D = shape
+        sampling_from = "prior" if likelihood_score_fn is None else "posterior"
+
+        if likelihood_score_fn is None:
+            likelihood_score_fn = lambda t, x: 0.
+
+        if backward:
+            x = x_1
+            t = torch.zeros(B).to(self.device) + self.sde.epsilon
+        else:
+            x = self.sde.prior(D).sample([B]).to(self.device)
+            t = torch.ones(B).to(self.device) * self.sde.T
+
+        # assume x is gaussian noise
+        normal_dist = torch.distributions.Normal(torch.zeros((B,) + tuple(D), device=self.device),
+                                                 torch.ones((B,) + tuple(D), device=self.device))
+
+        logpf_posterior = 0*normal_dist.log_prob(x).sum(tuple(range(1, len(x.shape)))).to(self.device)
+        logpb = 0*normal_dist.log_prob(x).sum(tuple(range(1, len(x.shape)))).to(self.device)#torch.zeros_like(logpf_posterior)
+        dt = -1/(steps+1)
+
+        #####
+        if save_traj:
+            traj = [x.clone()]
+
+        for step, _ in enumerate((pbar := tqdm(range(steps)))):
+            pbar.set_description(
+                f"Sampling from the {sampling_from} | t = {t[0].item():.1f} | sigma = {self.sde.sigma(t)[0].item():.1e}"
+                f"| scale ~ {x.std().item():.1e}")
+            if backward:
+                g = self.sde.diffusion(t, x)
+                std = g * (np.abs(dt)) ** (1 / 2)
+                x_prev = x.detach()
+                x = (x - self.sde.drift(t, x) * dt) + (std * torch.randn_like(x))
+            else:
+                x_prev = x.detach()
+            
+            t += dt * (-1.0 if backward else 1.0)
+            if t[0] < self.sde.epsilon:  # Accounts for numerical error in the way we discretize t.
+                continue # continue instead of break because it works for forward and backward
+            
+            g = self.sde.diffusion(t, x)
+
+            #lp_correction = self.get_langevin_correction(x)
+            
+            posterior_drift = -self.sde.drift(t, x) - (g ** 2) * (self.model_and_shape(t, x)) / self.sde.sigma(t).view(-1, *[1]*len(D))
+            
+            f_posterior = posterior_drift
+            # compute parameters for denoising step (wrt posterior)
+            x_mean_posterior = x + f_posterior * dt# * (-1.0 if backward else 1.0)
+            std = g * (np.abs(dt)) ** (1 / 2)
+
+            # compute step
+            if prior_sample and not backward:
+                x = x - self.sde.drift(t, x) * dt + std * torch.randn_like(x)
+            elif not backward:
+                x = x_mean_posterior + std * torch.randn_like(x)
+            x = x.detach()
+            
+            # compute parameters for pb
+            #t_next = t + dt
+            #pb_drift = model drift(t_next, x)
+            #x_mean_pb = x + pb_drift * (-dt)
+
+            if backward:
+                ref_drift = -self.sde.drift(t, x) - (g ** 2) * (self.ref_model_and_shape(t, x)) / self.sde.sigma(t).view(-1, *[1]*len(D))
+                pb_drift = ref_drift #-self.sde.drift(t, x)
+                x_mean_pb = x + pb_drift * (dt)
+            else:
+                ref_drift = -self.sde.drift(t, x_prev) - (g ** 2) * (self.ref_model_and_shape(t, x_prev)) / self.sde.sigma(t).view(-1, *[1]*len(D))
+                pb_drift = ref_drift #-self.sde.drift(t, x_prev)
+                x_mean_pb = x_prev + pb_drift * (dt)
+            #x_mean_pb = x_prev + pb_drift * (dt)
+            pb_std = g * (np.abs(dt)) ** (1 / 2)
+
+            if save_traj:
+                traj.append(x.clone())
+
+            pf_post_dist = torch.distributions.Normal(x_mean_posterior, std)
+            pb_dist = torch.distributions.Normal(x_mean_pb, pb_std)
+
+            # compute log-likelihoods of reached pos wrt to prior & posterior models
+            #logpb += pb_dist.log_prob(x_prev).sum(tuple(range(1, len(x.shape))))
+            if backward:
+                logpb += pb_dist.log_prob(x_prev).sum(tuple(range(1, len(x.shape))))
+                logpf_posterior += pf_post_dist.log_prob(x_prev).sum(tuple(range(1, len(x.shape))))
+            else:
+                logpb += pb_dist.log_prob(x).sum(tuple(range(1, len(x.shape))))
+                logpf_posterior += pf_post_dist.log_prob(x).sum(tuple(range(1, len(x.shape))))
+
+            if torch.any(torch.isnan(x)):
+                print("Diffusion is not stable, NaN were produced. Stopped sampling.")
+                break
+        if backward:
+            traj = list(reversed(traj))
+        logs = {
+            'x_mean_posterior': x,#,x_mean_posterior,
+            'logpf_prior': logpb,
+            'logpf_posterior': logpf_posterior,
+            'traj': traj if save_traj else None
+        }
+
+        return logs
+
     def forward_ddpm(
             self,
             shape,

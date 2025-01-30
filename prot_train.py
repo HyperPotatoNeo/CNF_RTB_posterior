@@ -2,6 +2,9 @@ import sys
 sys.path.append('./proteins/')
 
 import torch 
+import numpy as np 
+import random 
+
 import argparse
 from distutils.util import strtobool
 
@@ -13,7 +16,7 @@ import reward_models
 import prior_models
 from replay_buffer import ReplayBuffer
 
-from proteins.reward_ss_div import FoldClassifier, SheetPercentReward
+from proteins.reward_ss_div import FoldClassifier, SheetPercentReward, SSDivReward
 from proteins.conformation_energy import ConfEnergy 
 from proteins.foldflow_prior import FoldFlowModel 
 
@@ -51,10 +54,26 @@ parser.add_argument('--compute_fid', default=False, type=strtobool, help="Whethe
 
 parser.add_argument('--inference', default='vpsde', type=str, help='Inference method for prior', choices=['vpsde', 'ddpm'])
 parser.add_argument('--sampler_time', default = 0., type=float, help='Sampler learns to sample from p_t')
-
+parser.add_argument('--seed', default=0, type=int, help='Random seed for training')
 #parser.add_argument('--')
 
 args = parser.parse_args()
+
+# set seeds
+def set_seed(seed):
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)  # if you are using multi-GPU.
+    # For deterministic behavior
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
+set_seed(args.seed)
+
 
 if args.reward_prompt == '':
     args.reward_prompt = args.prompt
@@ -91,18 +110,23 @@ elif args.exp == "cifar":
     id = "cifar_target_class_" + str(args.target_class)
 
 elif args.exp == "protein":
-    reward_model = ConfEnergy(device = device)
-    r_str = "conf_energy"
+    #reward_model = ConfEnergy(device = device)
+    #r_str = "conf_energy"
     
     #reward_model = FoldClassifier(device = device)
-    #r_str = "classifier_r"
+    #r_str = "TEMP_classifier_r"
 
     #reward_model = SheetPercentReward(device = device)
-    #r_str = "sheet_r"
+    #r_str = "TEMP_sheet_r"
+
+    reward_model = SSDivReward(device = device)
+    r_str = "not_dsm_temp_6_centered_r_reg_bias"
+    # most successful one so far 
+    #"temp_2_normed_reward"#"temp_7_ss_div_REF_low_lr" #"temp_7_ss_div_r_v3_unif_rb_loaded"
 
     reward_args = []
 
-    seq_len = 100 #256 #64 
+    seq_len = 64 #100 #256 #64 
 
     in_shape = (seq_len, 7)
     prior_model = FoldFlowModel(device = device)
@@ -187,3 +211,5 @@ if args.langevin:
     rtb_model.pretrain_trainable_reward(n_iters = 20, batch_size = args.batch_size, learning_rate = args.lr, wandb_track = False) #args.wandb_track)
 
 rtb_model.finetune(shape=(args.batch_size, *in_shape), n_iters = args.n_iters, wandb_track=args.wandb_track, learning_rate=args.lr, prior_sample_prob=args.prior_sample_prob, replay_buffer_prob=args.replay_buffer_prob, anneal=args.anneal, anneal_steps=args.anneal_steps)
+
+#rtb_model.denoising_score_matching_unif(n_iters = 10000, learning_rate = 5e-5, clip=0.1, wandb_track = True)
