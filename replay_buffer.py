@@ -45,6 +45,16 @@ class ReplayBuffer:
             return batch, reward_batch
         elif self.sample_strategy == 'reward':
             batch, reward_batch = self.sample_reward(batch_size)
+            batch_unif, reward_batch_unif = self.sample_uniform(batch_size)
+
+            # sample with 1/4 high reward samples, rest uniform reward
+            
+            num_hi_reward = batch_size//4 
+            
+            print("\nBuffer Num hi reward: ", num_hi_reward)
+            batch[num_hi_reward:] = batch_unif[num_hi_reward:] 
+            reward_batch[num_hi_reward:] = reward_batch_unif[num_hi_reward:]
+
             return batch, reward_batch
         else:
             print('INVALID SAMPLE STRATEGY')
