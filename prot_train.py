@@ -16,7 +16,6 @@ import prior_models
 from replay_buffer import ReplayBuffer
 
 from proteins.reward_ss_div import FoldClassifier, SheetPercentReward, SSDivReward
-from proteins.conformation_energy import ConfEnergy 
 from proteins.foldflow_prior import FoldFlowModel 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -109,8 +108,6 @@ elif args.exp == "cifar":
     id = "cifar_target_class_" + str(args.target_class)
 
 elif args.exp == "protein":
-    #reward_model = ConfEnergy(device = device)
-    #r_str = "conf_energy"
     
     #reward_model = FoldClassifier(device = device)
     #r_str = "TEMP_classifier_r"
@@ -120,22 +117,14 @@ elif args.exp == "protein":
 
     reward_model = SSDivReward(device = device)
     
-    #r_str = "not_dsm_temp_6_centered_r_reg_bias"
-    r_str = "temp_4_ref_proc_retry_seed_" + str(args.seed)
-        
-    # most successful one so far 
-    #"temp_2_normed_reward"#"temp_7_ss_div_REF_low_lr" #"temp_7_ss_div_r_v3_unif_rb_loaded"
+    r_str = "ss_div_seed_" + str(args.seed)
 
     reward_args = []
 
-    seq_len = 64 #100 #256 #64 
+    seq_len = 64  
 
     in_shape = (seq_len, 7)
     prior_model = FoldFlowModel(device = device)
-
-    # only supported for batch_size 1 currently 
-    #args.batch_size = 1
-    #args.loss_batch_size = 1
     
     id = "protein_foldflow_"+ r_str +"_len_" + str(seq_len)
 
@@ -147,28 +136,7 @@ if not args.replay_buffer == 'none':
 
 if args.sampler_time == 0.: 
 
-    if args.exp == "protein":
-        rtb_model = protein_rtb.ProteinRTBModel(
-            device = device, 
-            reward_model = reward_model,
-            prior_model = prior_model,
-            in_shape = in_shape, 
-            reward_args = reward_args, 
-            id = id,
-            model_save_path = args.save_path,
-            langevin = args.langevin,
-            inference_type = args.inference,
-            tb = args.tb,
-            load_ckpt = args.load_ckpt,
-            load_ckpt_path = args.load_path,
-            entity = args.entity,
-            diffusion_steps = args.diffusion_steps, 
-            beta_start = args.beta_start, 
-            beta_end = args.beta_end,
-            loss_batch_size = args.loss_batch_size,
-            replay_buffer = replay_buffer)
-    else:
-        rtb_model = rtb.RTBModel(
+    rtb_model = protein_rtb.ProteinRTBModel(
             device = device, 
             reward_model = reward_model,
             prior_model = prior_model,
@@ -188,26 +156,8 @@ if args.sampler_time == 0.:
             loss_batch_size = args.loss_batch_size,
             replay_buffer = replay_buffer)
 else:
-    rtb_model = tb_sample_xt.TBModel(
-            device = device, 
-            reward_model = reward_model,
-            prior_model = prior_model,
-            in_shape = in_shape, 
-            reward_args = reward_args, 
-            id = id,
-            model_save_path = args.save_path,
-            sampler_time= args.sampler_time,  # time which gfn learns to sample at
-            langevin = args.langevin,
-            inference_type = args.inference,
-            tb = args.tb,
-            load_ckpt = args.load_ckpt,
-            load_ckpt_path = args.load_path,
-            entity = args.entity,
-            diffusion_steps = args.diffusion_steps, 
-            beta_start = args.beta_start, 
-            beta_end = args.beta_end,
-            loss_batch_size = args.loss_batch_size,
-            replay_buffer = replay_buffer)
+    print("Not supported")
+    
 
 if args.langevin:
     rtb_model.pretrain_trainable_reward(n_iters = 20, batch_size = args.batch_size, learning_rate = args.lr, wandb_track = False) #args.wandb_track)

@@ -666,8 +666,8 @@ class SSDivReward():
            percents = self.get_percents(sample_pdb_str)
 
            # vals should be ~ 0 to -5 
-           #logr = 4.0 * (torch.log(percents + 1e-12) - 1.2)
-           logr = 6.0 * (torch.log(percents + 1e-12) - 2.5)#10.0* torch.log(percents + self.eps) - 25.0 
+           logr = (torch.log(percents + 1e-12) - 1.2)
+           #logr = 6.0*(torch.log(percents + 1e-12) - 2.5)#10.0* torch.log(percents + self.eps) - 25.0 
 
         return logr
 

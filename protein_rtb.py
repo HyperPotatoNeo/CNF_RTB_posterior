@@ -14,7 +14,7 @@ import random
 
 from sde import VPSDE, DDPM
 import reward_models
-import utils
+import rtb_utils as utils
 
 
 
@@ -75,10 +75,6 @@ class ProteinRTBModel(nn.Module):
         self.mlp_dim = self.gfn_shape[0]*self.gfn_shape[1]*self.gfn_shape[2]       
         
         
-        #self.model = MLP(dim = self.mlp_dim, 
-        #                 out_shape = self.gfn_shape, 
-        #                 time_varying = True).to(self.device)
-        
         self.mlp_type = False #True
     
         self.model = UNetModelWrapper(
@@ -130,12 +126,9 @@ class ProteinRTBModel(nn.Module):
 
         self.reward_model = reward_model 
 
-        #self.tmp_dir = os.path.expanduser('~/scratch/tmp/'+id + '/')
-
         if langevin: 
             self.num_classes = 10
-            #self.trainable_reward = reward_models.TrainableClassifierReward(in_shape = self.in_shape, 
-            #                                                      device = self.device, num_classes = 10)
+           
             self.trainable_reward = reward_models.TrainableReward_1StepFlow(in_shape = self.in_shape, 
                                                                   prior_model_net = self.prior_model.prior_model, 
                                                                   device = self.device)
@@ -553,13 +546,14 @@ class ProteinRTBModel(nn.Module):
                 
                 model_samples = fwd_logs['x_mean_posterior']
 
-                w1, w2 = utils.wasserstein_dist_samples(model_samples.reshape(-1, 7), x0.reshape(-1, 7))
+                #w1, w2 = utils.wasserstein_dist_samples(model_samples.reshape(-1, 7), x0.reshape(-1, 7))
 
                 # get 
-                fig, true_trans_std, model_trans_std = utils.plot_so3_comparison(model_samples.reshape(-1, 7), x0.reshape(-1, 7))
+                #fig, true_trans_std, model_trans_std = utils.plot_so3_comparison(model_samples.reshape(-1, 7), x0.reshape(-1, 7))
 
-                wandb.log({"loss": loss.item(),  "wasserstein1": w1, "wasserstein2":w2, "epoch": it,
-                           "rotation comp fig": wandb.Image(fig), "translation true std": true_trans_std.mean().item(), "model trans std": model_trans_std.mean().item()})
+                wandb.log({"loss": loss.item(),  "epoch": it})
+                #wandb.log({"loss": loss.item(),  "wasserstein1": w1, "wasserstein2":w2, "epoch": it,
+                #           "rotation comp fig": wandb.Image(fig), "translation true std": true_trans_std.mean().item(), "model trans std": model_trans_std.mean().item()})
                 
                 
                 # save model and optimizer state

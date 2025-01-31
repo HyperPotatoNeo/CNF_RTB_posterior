@@ -15,8 +15,7 @@ import reward_models
 import prior_models
 from replay_buffer import ReplayBuffer
 
-from proteins.reward_ss_div import FoldClassifier, SheetPercentReward, SSDivReward
-from proteins.conformation_energy import ConfEnergy 
+from proteins.reward_ss_div import SSDivReward
 from proteins.foldflow_prior import FoldFlowModel 
 
 import rw_mcmc 
@@ -66,10 +65,7 @@ if args.loss_batch_size == -1:
     args.loss_batch_size = args.batch_size
 
 
-if args.exp == "protein":
-    #reward_model = ConfEnergy(device = device)
-    #r_str = "conf_energy"
-    
+if args.exp == "protein":  
     #reward_model = FoldClassifier(device = device)
     #r_str = "TEMP_classifier_r"
 
@@ -78,8 +74,7 @@ if args.exp == "protein":
 
     reward_model = SSDivReward(device = device)
     r_str = "RW_MCMC_temp_6_centered_r_reg_bias"
-    # most successful one so far 
-    #"temp_2_normed_reward"#"temp_7_ss_div_REF_low_lr" #"temp_7_ss_div_r_v3_unif_rb_loaded"
+   
 
     reward_args = []
 
