@@ -110,7 +110,7 @@ if args.wandb_track:
 log_reward_sum = 0.0
 log_prob_mean = 0.0
 counter = 0
-generated_images_dir = '/home/mila/s/siddarth.venkatraman/scratch/CNF_RTB_ckpts/hmc/' + args.exp + str(args.target_class) + args.reward_prompt
+generated_images_dir = '~/scratch/CNF_RTB_ckpts/hmc/' + args.exp + str(args.target_class) + args.reward_prompt
 true_images_dir = 'fid/cifar10_class_' + str(args.target_class)
 os.makedirs(generated_images_dir, exist_ok=True)
 
