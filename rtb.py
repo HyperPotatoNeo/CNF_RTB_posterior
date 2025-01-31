@@ -373,7 +373,7 @@ class RTBModel(nn.Module):
                 plt.close()
             wandb.log(log_dict)
             
-        if 'sd3' in exp:
+        if 'sd3' in exp or 'ffhq' in exp:
             print('SAVING IMAGES:')
             generated_images_dir = self.model_save_path + run_name + '/' + 'prior_images'
             os.makedirs(generated_images_dir, exist_ok=True)
@@ -440,7 +440,7 @@ class RTBModel(nn.Module):
                             if 'gan' in exp:
                                 title = 'SN-GAN Posterior (Bird)'
                             else:
-                                title = 'Flow Posterior (Frog)'
+                                title = 'Flow Posterior (Truck)'
                             grid = vutils.make_grid(img, nrow=5, padding=1)
                             # The grid is of shape (3, H, W). We need to permute for matplotlib.
                             plt.figure(figsize=(8, 8))
@@ -450,7 +450,7 @@ class RTBModel(nn.Module):
                             log_dict['posterior_grid'] = wandb.Image(plt)
                             plt.close()
                         
-                        if it%500 == 0 and it > 0 and 'sd3' in exp:
+                        if it%500 == 0 and it > 0 and ('sd3' in exp or 'ffhq' in exp):
                             print('SAVING IMAGES:')
                             generated_images_dir = self.model_save_path + run_name + '/' + 'posterior_images'
                             os.makedirs(generated_images_dir, exist_ok=True)

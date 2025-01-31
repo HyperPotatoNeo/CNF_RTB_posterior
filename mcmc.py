@@ -2,9 +2,11 @@ import torch
 import argparse
 import numpy as np
 from distutils.util import strtobool
-
+from torchvision import datasets, transforms
 import rtb
+import os
 import wandb
+from cleanfid import fid
 #import tb 
 import reward_models 
 import prior_models
@@ -22,7 +24,7 @@ parser.add_argument('-bs', '--batch_size', type=int, default=10, help="Training 
 parser.add_argument('--num_batches', type=int, default=10, help='Number of batches')
 parser.add_argument('--lr', '--learning_rate', default=1e-2, type=float, help='Initial learning rate.')
 parser.add_argument('--prompt', type=str, default="A photorealistic green rabbit on purple grass.", help='Prompt for finetuning')
-parser.add_argument('--reward_prompt', type=str, default="", help='Prompt for reward model (defaults to args.prompt)')
+parser.add_argument('--reward_prompt', type=str, default="", help='none')
 parser.add_argument('--target_class', type=int, default=0, help='Target class for classifier-tuning methods')
 parser.add_argument('--diffusion_steps', type=int, default=100)
 parser.add_argument('--wandb_track', default=False, type=strtobool, help='Whether to track with wandb.')
@@ -105,25 +107,53 @@ if args.wandb_track:
         name='hmc_' + args.exp
     )
 
+log_reward_sum = 0.0
+log_prob_mean = 0.0
+counter = 0
+generated_images_dir = '/home/mila/s/siddarth.venkatraman/scratch/CNF_RTB_ckpts/hmc/' + args.exp + str(args.target_class) + args.reward_prompt
+true_images_dir = 'fid/cifar10_class_' + str(args.target_class)
+os.makedirs(generated_images_dir, exist_ok=True)
+
 if args.method == 'hmc':
-    def log_prob_func(x, return_reward=False, beta=30.0):
+    def log_prob_func(x, return_reward=False, beta=100.0):
         x = x.view(1, in_shape[0], in_shape[1], in_shape[2])
         img = prior_model.differentiable_call(x)
         #reward_model(img).squeeze().backward()
         if return_reward:
-            return beta*reward_model(img).squeeze()
+            return reward_model(img).squeeze()
         else:
             norm_dist = torch.distributions.Normal(torch.zeros_like(x), torch.ones_like(x))
             return beta*reward_model(img).squeeze() + norm_dist.log_prob(x).sum()
 
-    num_samples = 400#args.batch_size
-    x_init = torch.randn(size=(np.prod(in_shape),)).cuda()
-    x_hmc = hamiltorch.sample(log_prob_func=log_prob_func, params_init=x_init, num_samples=num_samples, step_size=args.lr, num_steps_per_sample=20)
-    #print(x_hmc)
-    for i in range(400):
-        x = x_hmc[i]
-        print(i, log_prob_func(x, return_reward=True))
-        if args.wandb_track:
-            x = x.view(1, in_shape[0], in_shape[1], in_shape[2])
-            img = prior_model(x)
-            wandb.log({"hmc_image": wandb.Image(img[0])})
+    while True:
+        num_samples = 1000#args.batch_size
+        x_init = torch.randn(size=(np.prod(in_shape),)).cuda()
+        x_hmc = hamiltorch.sample(log_prob_func=log_prob_func, params_init=x_init, num_samples=num_samples, step_size=args.lr, num_steps_per_sample=5)
+        #print(x_hmc)
+        element_idx = [49,99,149,100,249]
+        with torch.no_grad():
+            for i in range(100, 1000, 10):
+                x = x_hmc[i]
+                log_reward_sum = log_reward_sum + log_prob_func(x, return_reward=True).detach().cpu()
+                counter += 1
+                #if args.wandb_track:
+                x = x.view(1, in_shape[0], in_shape[1], in_shape[2])
+                img = prior_model(x)
+                if 'cifar' in args.exp:
+                    img_pil = transforms.ToPILImage()(img[0])
+                else:
+                    img_pil = img[0]
+                img_pil.save(os.path.join(generated_images_dir, f'{counter}.png'))
+                if counter % 100 == 0:
+                    if args.wandb_track:
+                        wandb.log({"hmc_image": wandb.Image(img[0])})
+                    print(counter, 'log_reward_mean: ', log_reward_sum/counter)
+                if counter % 500 == 0 and 'cifar' in args.exp:
+                    fid_score = fid.compute_fid(generated_images_dir, true_images_dir)
+                    print(counter, 'FID: ', )
+                if counter == 6000:
+                    break
+                    
+        print('log_reward_mean: ', log_reward_sum/counter)
+            
+            #wandb.log({"hmc_image": wandb.Image(img[0])})

@@ -7,9 +7,9 @@ from diffusers.schedulers import EulerAncestralDiscreteScheduler
 from huggingface_hub import login
 import numpy as np
 # GAN FFHQ
-#import GAN.stylegan3.dnnlib as dnnlib
-#import GAN.stylegan3.legacy as legacy
-#from GAN.stylegan3.torch_utils import misc
+import GAN.stylegan3.dnnlib as dnnlib
+import GAN.stylegan3.legacy as legacy
+from GAN.stylegan3.torch_utils import misc
 from NVAE.model import AutoEncoder
 import NVAE.utils as utils
 from sngan_cifar10.sngan_cifar10 import Generator, SNGANConfig 
