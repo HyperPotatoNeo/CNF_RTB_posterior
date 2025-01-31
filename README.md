@@ -35,4 +35,7 @@ python3 train.py --exp "cifar" --replay_buffer 'uniform' --batch_size 64 --loss_
 ```bash
 python3 train.py --exp "sd3_align" --prompt "A quiet village is disrupted by a meteor strike" --reward_prompt "A quiet village is disrupted by a meteor strike" --replay_buffer 'uniform' --batch_size 64 --loss_batch_size 64 --wandb_track True --lr 3e-5 --prior_sample_prob 0.2 --replay_buffer_prob 0.2 --beta_start 25.0 --beta_end 100.0 --anneal_steps 5000 --diffusion_steps 25 --anneal False
 ```
-
+### Protein Structure 
+```bash
+python3 prot_train.py --exp protein --batch_size 16 --wandb_track True --lr 1e-5 --beta_start 100.0 --beta_end 100.0 --diffusion_steps 20 --anneal False --langevin False --replay_buffer_prob 0.2 --replay_buffer reward --sampler_time 0. --loss_batch_size 16 --clip 0.05 
+```
