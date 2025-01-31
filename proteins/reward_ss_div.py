@@ -36,7 +36,7 @@ from PIL import Image
 
 
 # get samples and save as WandB images
-def get_prot_image(samples):
+def get_prot_image(samples, tmp_dir = "./"):
     B = samples["prot_traj"].shape[1]
 
     imgs = []
@@ -47,7 +47,7 @@ def get_prot_image(samples):
         sample = samples["prot_traj"][0, i, ...]
         
         pdb_str = prot_to_pdb(sample)
-        fname = write_pdb(pdb_str, save_path = "./temp.pdb")
+        fname = write_pdb(pdb_str, save_path = tmp_dir +"temp.pdb")
         
         print(fname)
 
@@ -69,19 +69,19 @@ def get_prot_image(samples):
         cmd.show("sticks", "organic")    # Show ligands as sticks
         cmd.zoom()                       # Zoom to molecule
 
-        cmd.png("temp.png", width=800, height=800)
+        cmd.png(tmp_dir + "temp.png", width=800, height=800)
         
         # Wait until the file exists
-        while (not os.path.exists("temp.png")) or (os.path.getsize("temp.png") == 0):
+        while (not os.path.exists(tmp_dir + "temp.png")) or (os.path.getsize(tmp_dir + "temp.png") == 0):
             time.sleep(0.1)  # Sleep for a short duration before checking again
 
         # load .png  
-        img = Image.open("temp.png")
+        img = Image.open(tmp_dir + "temp.png")
         
         imgs.append(img)
 
         # Cleanup
-        os.remove("temp.png")
+        os.remove(tmp_dir + "temp.png")
         cmd.delete('all')
 
     return imgs 
@@ -479,7 +479,7 @@ class SheetPercentReward():
         }
 
 
-    def get_percents(self, pdb_str_list, *args):
+    def get_percents(self, pdb_str_list, tmp_dir = "./", *args):
         batch_size = len(pdb_str_list)
         print("pdb batch size: ", batch_size)
 
@@ -493,7 +493,7 @@ class SheetPercentReward():
                 #    f.write(pdb_str)
                 # pdb_filename = "./protein_{}.pdb".format(i)
 
-                pdb_filename = write_pdb(pdb_str, save_path = f"./protein_{i}.pdb")
+                pdb_filename = write_pdb(pdb_str, save_path = tmp_dir + f"protein_{i}.pdb")
 
                 # Create temporary trajectory
                 traj = md.load_pdb(pdb_filename)
@@ -577,8 +577,8 @@ class SSDivReward():
         return 
 
     # get samples and save as WandB images
-    def get_prot_image(self, samples):
-        return get_prot_image(samples)
+    def get_prot_image(self, samples, tmp_dir):
+        return get_prot_image(samples, tmp_dir)
 
     def calc_ss_percentages(self, traj):
         """
@@ -609,7 +609,7 @@ class SSDivReward():
         }
 
 
-    def get_percents(self, pdb_str_list, *args):
+    def get_percents(self, pdb_str_list, tmp_dir = "./", *args):
         batch_size = len(pdb_str_list)
         print("pdb batch size: ", batch_size)
 
@@ -622,15 +622,11 @@ class SSDivReward():
         with torch.no_grad():
             for i, pdb_str in enumerate(pdb_str_list):
                 
-                #with open(f"./protein_{i}.pdb", "w") as f:
-                #    f.write(pdb_str)
-                #pdb_filename = "./protein_{}.pdb".format(i)
-                
-                pdb_filename = write_pdb(pdb_str, save_path = f"./protein_{i}.pdb")
+                pdb_filename = write_pdb(pdb_str, save_path = tmp_dir + f"protein_{i}.pdb")
                 
                 print("pdb_filename: ", pdb_filename)
 
-                while (not os.path.exists("./protein_{}.pdb".format(i))) or (os.path.getsize("./protein_{}.pdb".format(i)) == 0):
+                while (not os.path.exists(pdb_filename)) or (os.path.getsize(pdb_filename) == 0):
                     time.sleep(0.1)
                 
 
@@ -676,16 +672,17 @@ class SSDivReward():
         return logr
 
       # sample input must be directly from foldflow2 model output 
-    def __call__(self, sample):
+    def __call__(self, sample, tmp_dir):
 
         sample = to_pdb(sample)
         
         with torch.no_grad():
-           percents = self.get_percents(sample)
+           percents = self.get_percents(sample, tmp_dir = tmp_dir)
 
            # vals should be ~ 0 to -5 
-           #logr = 4.0 * (torch.log(percents + 1e-12) - 1.2)
-           logr = 6.0 * (torch.log(percents + 1e-12) - 2.5)#10.0* torch.log(percents + self.eps) - 25.0 
+           logr = 4.0 * (torch.log(percents + 1e-12) - 1.2)
+           
+           #logr = 6.0 * (torch.log(percents + 1e-12) - 2.5)#10.0* torch.log(percents + self.eps) - 25.0 
 
         print("Log reward: ", logr)
         print("logr shape: ", logr.shape)

@@ -79,7 +79,7 @@ class ProteinRTBModel(nn.Module):
         #                 out_shape = self.gfn_shape, 
         #                 time_varying = True).to(self.device)
         
-        self.mlp_type = True
+        self.mlp_type = False #True
     
         self.model = UNetModelWrapper(
             dim = self.gfn_shape,
@@ -92,8 +92,9 @@ class ProteinRTBModel(nn.Module):
             dropout = 0.0,
         ).to(self.device)
         
+        
         # for DSM pretraining 
-        """
+        
         self.load_pretrained_ckpt_path = os.path.expanduser(load_pretrained_checkpoint_path)
         checkpoint = torch.load(self.load_pretrained_ckpt_path)
         self.model.load_state_dict(checkpoint['model_state_dict'])
@@ -120,14 +121,16 @@ class ProteinRTBModel(nn.Module):
         self.ref_model.eval() 
         self.ref_model.requires_grad_ = False 
         
-        """
         
-        self.ref_proc = False #True 
+        
+        self.ref_proc = True #False 
 
         # Prior flow model pipeline
         self.prior_model = prior_model 
 
         self.reward_model = reward_model 
+
+        #self.tmp_dir = os.path.expanduser('~/scratch/tmp/'+id + '/')
 
         if langevin: 
             self.num_classes = 10
@@ -331,7 +334,7 @@ class ProteinRTBModel(nn.Module):
             
             img = self.prior_model(x)
             
-            log_r = self.reward_model(img, *self.reward_args).to(self.device)
+            log_r = self.reward_model(img, tmp_dir = self.tmp_dir).to(self.device)
         if return_img:
             return log_r, img
         return log_r
@@ -376,15 +379,29 @@ class ProteinRTBModel(nn.Module):
                 )
             x_mean_posterior, logpf_prior, logpf_posterior = fwd_logs['x_mean_posterior'], fwd_logs['logpf_prior'], fwd_logs['logpf_posterior']
 
+            if rb_sample:
+                scale_factor = 1.0 #0.5
+            else:
+                scale_factor = 1.0
+
             if not rb_sample:
                 logr_x_prime = self.log_reward(x_mean_posterior)
 
-            self.logZ.data = (-logpf_posterior + logpf_prior + self.beta*logr_x_prime).mean()
+            # for off policy stability 
+            logpf_posterior = logpf_posterior * scale_factor
+            logpf_prior = logpf_prior * scale_factor
+
+            self.logZ.data = (-logpf_posterior + logpf_prior + self.beta*logr_x_prime).mean().detach()
 
             print("logpf_posterior: ", logpf_posterior.mean().item())
             print("logpf_prior: ", logpf_prior.mean().item())
             print("logr_x_prime: ", logr_x_prime.mean().item())
             print("logZ: ", self.logZ.item())
+
+            print("batch nums: ")
+            print("batch logpf_posterior: ", logpf_posterior)
+            print("batch logpf_prior: ", logpf_prior)
+            print("batch logr_x_prime: ", logr_x_prime)
 
             rtb_loss = 0.5 * (((logpf_posterior + self.logZ - logpf_prior - self.beta*logr_x_prime) ** 2) - learning_cutoff).relu()
 
@@ -402,7 +419,8 @@ class ProteinRTBModel(nn.Module):
                 shape=shape,
                 traj=fwd_logs['traj'],
                 correction=correction,
-                batch_size=B
+                batch_size=B, 
+                rb = rb_sample
             )
         elif self.sde_type == 'ddpm':
 
@@ -475,6 +493,7 @@ class ProteinRTBModel(nn.Module):
          
         if self.load_ckpt:
             self.model, optimizer, load_it = self.load_checkpoint(self.model, optimizer)
+            #load_it = 0 # to save on fresh runs
         else:
             load_it = 0
         
@@ -562,8 +581,14 @@ class ProteinRTBModel(nn.Module):
 
         param_list = [{'params': self.model.parameters()}]
         optimizer = torch.optim.Adam(param_list, lr=learning_rate)
-        run_name = self.id + '_sde_' + self.sde_type +'_steps_' + str(self.steps) + '_lr_' + str(learning_rate) + '_beta_start_' + str(self.beta_start) + '_beta_end_' + str(self.beta_end) + '_anneal_' + str(anneal) + '_prior_prob_' + str(prior_sample_prob) + '_rb_prob_' + str(replay_buffer_prob) + '_langevin_' + str(self.langevin)
+        run_name = self.id + '_sde_' + self.sde_type +'_steps_' + str(self.steps) + '_lr_' + str(learning_rate) + '_beta_start_' + str(self.beta_start) + '_beta_end_' + str(self.beta_end) + '_anneal_' + str(anneal) + '_prior_prob_' + str(prior_sample_prob) + '_rb_prob_' + str(replay_buffer_prob) + '_clip_' + str(clip)
         
+        self.tmp_dir = os.path.expanduser("~/scratch/CNF_tmp/" + run_name + '/')
+        print("TMP DIR for pdb files: ", self.tmp_dir)
+
+        if not os.path.exists(self.tmp_dir):
+            os.makedirs(self.tmp_dir)
+
         if self.load_ckpt:
             self.model, optimizer, load_it = self.load_checkpoint(self.model, optimizer)
         else:
@@ -583,7 +608,10 @@ class ProteinRTBModel(nn.Module):
                 "beta_start": self.beta_start,
                 "beta_end": self.beta_end,
                 "anneal": anneal,
-                "anneal_steps": anneal_steps
+                "anneal_steps": anneal_steps,
+                "clip":clip,
+                "tmp_dir": self.tmp_dir,
+                "load ckpt path": self.load_ckpt_path
             }
             wandb.config.update(hyperparams)
             with torch.no_grad():
@@ -594,11 +622,11 @@ class ProteinRTBModel(nn.Module):
                 else:
                     x = torch.randn(num_test_samples, *self.in_shape, device=self.device)
                 img = self.prior_model(x)
-                prior_reward = self.reward_model(img, *self.reward_args)
+                prior_reward = self.reward_model(img, tmp_dir = self.tmp_dir)
             if not protein_type:
                 wandb.log({"prior_samples": [wandb.Image(img[k], caption = prior_reward[k]) for k in range(len(img))]})
             else:
-                imgs_pil = self.reward_model.get_prot_image(img)
+                imgs_pil = self.reward_model.get_prot_image(img, tmp_dir = self.tmp_dir)
                 wandb.log({"prior_samples": [wandb.Image(imgs_pil[k], caption = prior_reward[k]) for k in range(len(imgs_pil))]})
         for it in range(load_it, n_iters):
             prior_traj = False
@@ -607,69 +635,75 @@ class ProteinRTBModel(nn.Module):
             # No replay buffer for first 10 iters
             if rand_n < prior_sample_prob:
                 prior_traj = True
-            elif it > 5 and rand_n < prior_sample_prob + replay_buffer_prob:
+            elif (it - load_it) > 5 and rand_n < prior_sample_prob + replay_buffer_prob:
                 rb_traj = True
                 
             self.beta = self.get_beta(it, anneal, anneal_steps)
-            optimizer.zero_grad()
-            loss, logr = self.batched_rtb(shape=shape, prior_sample=prior_traj, rb_sample=rb_traj)
-
-            if clip > 0:
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=clip)
-            optimizer.step() 
             
-            # trainable reward classifier
-            if self.langevin:
-                x_1, logr_x_prime = self.replay_buffer.sample(shape[0])
-                self.update_trainable_reward(x_1)
+            if rb_traj:
+                num_it = 1 #20
+            else:
+                num_it = 1
+            
+            for j in range(num_it):
+                print("Repeat vals: ", j)
+                optimizer.zero_grad()
+                loss, logr = self.batched_rtb(shape=shape, prior_sample=prior_traj, rb_sample=rb_traj)
 
-            if wandb_track: 
-                if not it%100 == 0:
-                    wandb.log({"loss": loss.item(), "logZ": self.logZ.detach().cpu().numpy(), "log_r": logr.item(), "epoch": it})
+
+                if clip > 0:
+                    v_g = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=clip)
+                    gnorm = v_g.item()
                 else:
-                    with torch.no_grad():
-                        if self.sde_type == 'vpsde' and self.ref_proc:
-                            logs = self.forward_ref_proc(
-                                shape=(num_test_samples, *D),
-                                steps = self.steps
-                            )
-                        elif self.sde_type == 'vpsde':
-                            logs = self.forward(
-                                shape=(num_test_samples, *D),
-                                steps=self.steps
-                            )
-                        elif self.sde_type == 'ddpm':
-                            logs = self.forward_ddpm(
-                                shape=(num_test_samples, *D),
-                                steps=self.steps
-                            )
+                    gnorm = -1
 
-                        x = self.prior_model.normalize_rigids(logs['x_mean_posterior'], scale_trans = (not self.ref_proc))
-                        img = self.prior_model(x)
-                        post_reward = self.reward_model(img, *self.reward_args)
-                        
-                        if self.langevin:
-                            trained_reward = self.trainable_reward(x).log_softmax(dim=-1)
+                optimizer.step() 
+
+                # trainable reward classifier
+                if self.langevin:
+                    x_1, logr_x_prime = self.replay_buffer.sample(shape[0])
+                    self.update_trainable_reward(x_1)
+
+                if wandb_track: 
+                    if not it%100 == 0:
+                        wandb.log({"loss": loss.item(), "logZ": self.logZ.detach().cpu().numpy(), "log_r": logr.item(), "gnorm": gnorm, "epoch": it})
+                    else:
+                        with torch.no_grad():
+                            if self.sde_type == 'vpsde' and self.ref_proc:
+                                logs = self.forward_ref_proc(
+                                    shape=(num_test_samples, *D),
+                                    steps = self.steps
+                                )
+                            elif self.sde_type == 'vpsde':
+                                logs = self.forward(
+                                    shape=(num_test_samples, *D),
+                                    steps=self.steps
+                                )
+                            elif self.sde_type == 'ddpm':
+                                logs = self.forward_ddpm(
+                                    shape=(num_test_samples, *D),
+                                    steps=self.steps
+                                )
+
+                            x = self.prior_model.normalize_rigids(logs['x_mean_posterior'], scale_trans = (not self.ref_proc))
+                            img = self.prior_model(x)
+                            post_reward = self.reward_model(img, tmp_dir = self.tmp_dir)
                             
-                            if not protein_type:
-                                wandb.log({"prior_samples": [wandb.Image(img[k], caption = "logR(x1) = {}, TrainlogR(z) = {}".format(prior_reward[k], trained_reward[k])) for k in range(len(img))]})
-                        else:
-                            if not protein_type:
-                                wandb.log({"loss": loss.item(), "logZ": self.logZ.detach().cpu().numpy(), "log_r": logr.item(), "epoch": it, 
-                                   "posterior_samples": [wandb.Image(img[k], caption=post_reward[k]) for k in range(len(img))]})
-                            else:
+                            if self.langevin:
+                                trained_reward = self.trainable_reward(x).log_softmax(dim=-1)
                                 
+                            else:        
                                 if hasattr(self.reward_model, 'classifier_type'):
                                     logr_, pred_all, acc = self.reward_model.pred_all_acc(img)
                                 else:
                                     acc = -1.0
 
-                                imgs_pil = self.reward_model.get_prot_image(img)
-                                wandb.log({"loss": loss.item(), "logZ": self.logZ.detach().cpu().numpy(), "log_r": logr.item(), "epoch": it,
-                                           "posterior_samples":  [wandb.Image(imgs_pil[k], caption=post_reward[k]) for k in range(len(imgs_pil))], "acc": acc})
+                                imgs_pil = self.reward_model.get_prot_image(img, tmp_dir = self.tmp_dir)
+                                wandb.log({"loss": loss.item(), "logZ": self.logZ.detach().cpu().numpy(), "log_r": logr.item(), "gnorm": gnorm, "epoch": it,
+                                            "posterior_samples":  [wandb.Image(imgs_pil[k], caption=post_reward[k]) for k in range(len(imgs_pil))], "acc": acc})
 
-                        # save model and optimizer state
-                        self.save_checkpoint(self.model, optimizer, it, run_name)
+                            # save model and optimizer state
+                            self.save_checkpoint(self.model, optimizer, it, run_name)
     
     def get_langevin_correction(self, x):
         # add gradient wrt x of trainable reward to model
@@ -1075,6 +1109,7 @@ class ProteinRTBModel(nn.Module):
             guidance_factor=0.,
             detach_freq=0.0,
             backward=False,
+            rb = False
     ):
         """
         Batched implementation of self.forward. See self.forward for details.
@@ -1164,9 +1199,18 @@ class ProteinRTBModel(nn.Module):
             # compute log-likelihoods of reached pos wrt to posterior model
             logpf_posterior = pf_post_dist.log_prob(xs).sum(tuple(range(1, len(xs.shape))))
 
+            if rb:
+                scale_factor = 1.0 #0.5
+            else:
+                scale_factor = 1.0
+
+            
+
             # compute loss for posterior & accumulate gradients.
-            partial_rtb = ((logpf_posterior + self.logZ) * correction.repeat(bs)).mean()
+            partial_rtb = ((scale_factor * logpf_posterior + self.logZ) * correction.repeat(bs)).mean()
             partial_rtb.backward()
+
+            #print("In rtb backward logpf poserior + logZ * loss: ", (logpf_posterior + self.logZ) * correction.repeat(bs))
 
             if torch.any(torch.isnan(x)):
                 print("Diffusion is not stable, NaN were produced. Stopped sampling.")

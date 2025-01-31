@@ -8,9 +8,8 @@ import random
 import argparse
 from distutils.util import strtobool
 
-import rtb 
 import protein_rtb
-import tb_sample_xt
+#import tb_sample_xt
 #import tb 
 import reward_models 
 import prior_models
@@ -55,7 +54,7 @@ parser.add_argument('--compute_fid', default=False, type=strtobool, help="Whethe
 parser.add_argument('--inference', default='vpsde', type=str, help='Inference method for prior', choices=['vpsde', 'ddpm'])
 parser.add_argument('--sampler_time', default = 0., type=float, help='Sampler learns to sample from p_t')
 parser.add_argument('--seed', default=0, type=int, help='Random seed for training')
-#parser.add_argument('--')
+parser.add_argument('--clip', default=0.1, type=float, help='Gradient clipping value')
 
 args = parser.parse_args()
 
@@ -120,7 +119,10 @@ elif args.exp == "protein":
     #r_str = "TEMP_sheet_r"
 
     reward_model = SSDivReward(device = device)
-    r_str = "not_dsm_temp_6_centered_r_reg_bias"
+    
+    #r_str = "not_dsm_temp_6_centered_r_reg_bias"
+    r_str = "temp_4_ref_proc_retry_seed_" + str(args.seed)
+        
     # most successful one so far 
     #"temp_2_normed_reward"#"temp_7_ss_div_REF_low_lr" #"temp_7_ss_div_r_v3_unif_rb_loaded"
 
@@ -210,6 +212,11 @@ else:
 if args.langevin:
     rtb_model.pretrain_trainable_reward(n_iters = 20, batch_size = args.batch_size, learning_rate = args.lr, wandb_track = False) #args.wandb_track)
 
-rtb_model.finetune(shape=(args.batch_size, *in_shape), n_iters = args.n_iters, wandb_track=args.wandb_track, learning_rate=args.lr, prior_sample_prob=args.prior_sample_prob, replay_buffer_prob=args.replay_buffer_prob, anneal=args.anneal, anneal_steps=args.anneal_steps)
+rtb_model.finetune(shape=(args.batch_size, *in_shape), n_iters = args.n_iters, 
+                   wandb_track=args.wandb_track, learning_rate=args.lr, 
+                   clip = args.clip,
+                   prior_sample_prob=args.prior_sample_prob, 
+                   replay_buffer_prob=args.replay_buffer_prob, 
+                   anneal=args.anneal, anneal_steps=args.anneal_steps)
 
 #rtb_model.denoising_score_matching_unif(n_iters = 10000, learning_rate = 5e-5, clip=0.1, wandb_track = True)

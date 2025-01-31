@@ -26,7 +26,8 @@ class RW_MCMC():
 
         self.load = load
         if self.load:
-            self.load_path = sample_save_path + "sample_dict_rw_mcmc_it_{}.pkl"
+            # must enter sample save path
+            self.load_path = sample_save_path #+ load_sample_dict
             self.load_path = os.path.expanduser(self.load_path)
 
         if coord_scaling:
@@ -64,7 +65,7 @@ class RW_MCMC():
             log_prior = self.latent_prior.log_prob(translations).sum(dim=(1,2))
 
             prior_out = self.prior_model(x)
-            log_r = self.reward_model(prior_out, *self.reward_args).to(self.device)
+            log_r = self.reward_model(prior_out, tmp_dir = self.tmp_dir).to(self.device)
 
             log_prob = log_prior + self.beta * log_r
 
@@ -96,9 +97,15 @@ class RW_MCMC():
         # accept with probability min(1, p(x_proposal) / p(x))
         return torch.exp(log_prob_proposal - log_prob)
     
-    def sample(self, batch_size, n_steps, wandb_track = False, load=False):
+    def sample(self, batch_size, n_steps, wandb_track = False):
         
         run_name = self.id + '_beta_' + str(self.beta) + '_step_size_' + str(self.step_size) +'_batch_size_' + str(batch_size) 
+        
+        self.tmp_dir = os.path.expanduser("~/scratch/CNF_tmp/" + run_name + '/')
+        print("TMP DIR for pdb files: ", self.tmp_dir)
+        
+        if not os.path.exists(self.tmp_dir):
+            os.makedirs(self.tmp_dir)
 
         if wandb_track:
             wandb.init(
@@ -112,26 +119,37 @@ class RW_MCMC():
                 "batch_size": batch_size,
                 "n_steps": n_steps,
                 "reward_args": self.reward_args,
-                "beta": self.beta
+                "beta": self.beta,
+                "tmp_dir": self.tmp_dir
             }
             wandb.config.update(hyperparams)
         
         # x assumed to be [B, N, 7]  - last 3 coordinates are translations
         samples_array = []
         
-        if load:
-            print("Loading samples from: ", self.load_path)
+        if self.load:
+            print("\n\nLoading samples from: ", self.load_path)
 
             samples_prev = pickle.load(open(self.load_path, "rb"))
-            x = samples_prev["rigids_t"].to(self.device)
-            cur_it = 301 
+            print("Loaded samples dict keys: ", samples_prev.keys())
+            x = torch.tensor(samples_prev["rigid_traj"]).to(self.device)
+            print("x shape: ", x.shape)
+            x  = x[-1, ...]
+            print("x init shape: ", x.shape)
+            cur_it = 0 
+
+            
         else:
             # initialize from prior model 
             x = self.prior_model.sample_prior(batch_size= batch_size, sample_length = self.sample_length)
             x = x["rigids_t"].to(self.device)
             cur_it = 0
         #x = x.to(self.device)
-
+        
+        #print("Trying to load: ", self.load)
+        #print("Load path: ", self.load_path)
+        #return 
+    
         samples_array.append(x.cpu().detach().numpy())
 
         num_samples_total = 0
@@ -160,7 +178,7 @@ class RW_MCMC():
             acceptance_rate_total = num_accepted_total/num_samples_total 
 
             prior_out = self.prior_model(x)
-            log_r = self.reward_model(prior_out, *self.reward_args).to(self.device)
+            log_r = self.reward_model(prior_out, tmp_dir = self.tmp_dir).to(self.device)
             log_r_mean = log_r.mean()
             
             print("\nlog_r: {}, accept_rate_batch:{}, accept_rate_total: {}".format(log_r_mean, acceptance_rate_batch, acceptance_rate_total))
@@ -178,7 +196,7 @@ class RW_MCMC():
                     log_r  = log_r.cpu().detach().numpy()
 
 
-                    imgs_pil = self.reward_model.get_prot_image(prior_out)
+                    imgs_pil = self.reward_model.get_prot_image(prior_out, tmp_dir =self.tmp_dir)
                     wandb.log({"log_r": log_r_mean.item(), "epoch": i, "accept_rate_batch": acceptance_rate_batch, "accept_rate_total": acceptance_rate_total, 
                                 "posterior_samples":  [wandb.Image(imgs_pil[k], caption=log_r[k]) for k in range(len(imgs_pil))], 
                                 "num_saved_samples": num_saved_samples})

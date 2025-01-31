@@ -8,7 +8,6 @@ import random
 import argparse
 from distutils.util import strtobool
 
-import rtb 
 import protein_rtb
 import tb_sample_xt
 #import tb 
@@ -108,7 +107,8 @@ mcmc = rw_mcmc.RW_MCMC(
         entity = args.entity,
         step_size = args.lr,
         beta = args.beta,
-        coord_scaling = True
+        coord_scaling = True,
+        load = args.load
     )
 
 mcmc.sample(batch_size = args.batch_size, 
