@@ -11,7 +11,7 @@ from pytorch_lightning.loggers import WandbLogger
 def main():
     torch.manual_seed(1)
 
-    savedir = "/home/mila/m/mohsin.hasan/scratch/celeba_logs"
+    savedir = "~/scratch/celeba_logs"
 
     # setup lightning module
     model = LightningCelebA(num_classes=3, lr=1e-3)
