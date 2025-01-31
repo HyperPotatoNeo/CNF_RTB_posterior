@@ -3,8 +3,7 @@ from torchvision import transforms, datasets
 from torch.utils.data import DataLoader
 import pytorch_lightning as pl
 
-DATA_ROOT = '/home/mila/m/mohsin.hasan/scratch/data/'
-#DATA_ROOT = "/network/datasets/torchvision/"
+DATA_ROOT = "/network/datasets/torchvision/"
 
 
 #custom_transforms = transforms.Compose([
