@@ -9,7 +9,7 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     #lmodule = LightningCelebA(num_classes=2, lr=1e-3)
-    lmodule = LightningCelebA.load_from_checkpoint("/home/mila/m/mohsin.hasan/scratch/celeba_logs/hair_classifier.ckpt")
+    lmodule = LightningCelebA.load_from_checkpoint("~/scratch/celeba_logs/hair_classifier.ckpt")
 
     lmodule.to(device)
     lmodule.eval()
