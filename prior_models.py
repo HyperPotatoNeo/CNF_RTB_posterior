@@ -152,7 +152,7 @@ class CIFARModel():
             attention_resolutions="16",
             dropout=0.1,
         ).to(device)
-        model_ckpt = "models/cifar10/otcfm_cifar10_weights_step_400000.pt"
+        model_ckpt = "models/cifar10/cfm_cifar10_weights_step_400000.pt"
         checkpoint = torch.load(model_ckpt, map_location=device)
 
         state_dict = checkpoint["ema_model"]
