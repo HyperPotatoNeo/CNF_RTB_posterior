@@ -5,6 +5,7 @@ import os
 from torchvision import datasets, transforms
 import rtb 
 import non_latent_rtb
+import memoryless_rtb 
 import memoryless_am
 #import tb 
 import reward_models 
@@ -51,6 +52,10 @@ parser.add_argument('--detach_freq', default=0.8, type=float, help='Number of sa
 
 parser.add_argument('--posterior_ratio', default=0.2, type=float, help='Ratio of finetuning model for parameterizing drift')
 
+parser.add_argument('--lora', default=False, type=strtobool, help='Whether to use lora or not')
+parser.add_argument('--lora_rank', default=16, type=int, help='rank when using LORA peft')
+
+parser.add_argument('--clip_x', default=False, type=strtobool, help='clip x between [-1,1] during sampling (for images)')
 #parser.add_argument('--')
 
 args = parser.parse_args()
@@ -113,7 +118,7 @@ elif args.exp == "cifar":
     reward_args  = [args.target_class]
     in_shape  = (3, 32, 32)
     prior_model = prior_models.CIFARModel(device = device,
-                                          num_inference_steps=20) 
+                                          num_inference_steps = args.diffusion_steps) 
     id = "cifar_target_class_" + str(args.target_class)
 
 if 'cifar' in args.exp and args.compute_fid:
@@ -122,14 +127,32 @@ if 'cifar' in args.exp and args.compute_fid:
     class_label = args.target_class
     output_dir = 'fid/cifar10_class_' + str(class_label)
     os.makedirs(output_dir, exist_ok=True)
+
+    output_dir_all = 'fid/cifar10_class_all'
+    os.makedirs(output_dir_all, exist_ok=True)
+
     generated_images_dir = 'fid/' + args.exp + '_cifar10_class_' + str(class_label)
     os.makedirs(generated_images_dir, exist_ok=True)
 
+    count = 0
+
     # Filter and save images of class
     for i, (img, label) in enumerate(train_dataset):
+        
         if label == class_label:
-            img = transforms.ToPILImage()(img)
+            img = transforms.ToPILImage()(img)    
             img.save(os.path.join(output_dir, f'{i}.png'))
+
+            count += 1
+
+    label_counts = {i: 0 for i in range(10)}
+    for i, (img, label) in enumerate(train_dataset):
+        if label_counts[label] < count // 10:
+            img = transforms.ToPILImage()(img)
+            img.save(os.path.join(output_dir_all, f'label_{label}_{label_counts[label]}.png'))
+            label_counts[label] += 1
+
+        
 
 if args.tb:
     print("Training with TB")
@@ -141,8 +164,9 @@ if not args.replay_buffer == 'none':
 
 # non-latent RTB is only implemented for CIFAR now.
 if args.method == 'nl_rtb' and 'cifar' in args.exp:
-    model = prior_models.CIFARModel(device = device).get_prior_model().train()   
-    rtb_model = non_latent_rtb.RTBModel(
+    model = prior_models.CIFARModel(device = device, num_inference_steps=args.diffusion_steps).get_prior_model().train()   
+    #rtb_model = non_latent_rtb
+    rtb_model = memoryless_rtb.RTBModel(
             device = device, 
             reward_model = reward_model,
             prior_model = prior_model,
@@ -152,6 +176,9 @@ if args.method == 'nl_rtb' and 'cifar' in args.exp:
             id = id,
             model_save_path = args.save_path,
             langevin = args.langevin,
+            lora = args.lora,
+            lora_rank = args.lora_rank,
+            clip_x = args.clip_x,
             inference_type = args.inference,
             tb = args.tb,
             load_ckpt = args.load_ckpt,

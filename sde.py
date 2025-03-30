@@ -97,8 +97,10 @@ class MemorylessSDE():
         return torch.sqrt(2.0 * self.eta(t))
     
     def kappa(self, t: Tensor):
-        return self.alpha_dot(t) / (self.alpha(t) + self.epsilon)
-    
+        kappa = self.alpha_dot(t) / (self.alpha(t) + self.epsilon)
+        kappa = torch.clamp(kappa, min=0.1, max=20)
+        return kappa 
+
     def eta(self, t: Tensor):
         return self.beta(t) * (self.kappa(t) * self.beta(t) - self.beta_dot(t))
 
@@ -108,7 +110,9 @@ class MemorylessSDE():
 
     def diffusion(self, t: Tensor, x: Tensor) -> Tensor:  
         _, *D = x.shape
-        return torch.sqrt(2.0 * self.eta(t)).view(-1, *[1]*len(D))
+        eta_clamped = 2.0 *self.eta(t)
+        eta_clamped = torch.clamp(eta_clamped, min=0.01, max=10)  # was prev max ar 20
+        return torch.sqrt(eta_clamped).view(-1, *[1]*len(D))
 
     # backward drift
     def drift(self, t: Tensor, x: Tensor) -> Tensor:
