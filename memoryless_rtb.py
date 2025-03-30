@@ -11,7 +11,7 @@ from prior_models import MLP
 from cleanfid import fid
 from sde import VPSDE, DDPM, MemorylessSDE
 import reward_models
-import utils
+import utils_rtb
 import copy 
 
 from peft import LoraConfig, get_peft_model, set_peft_model_state_dict
@@ -365,7 +365,8 @@ class RTBModel(nn.Module):
                                 "log_r": logr.item(), "epoch": it})
                 else:
                     with torch.no_grad():
-   
+                        self.model.eval() 
+
                         logs = self.forward(
                                 shape=(10, *D),
                                 steps=self.steps, ode=True)
@@ -440,6 +441,8 @@ class RTBModel(nn.Module):
 
                         wandb.log(log_dict)
 
+                        self.model.train() 
+                        
                         # save model and optimizer state
                         self.save_checkpoint(self.model, optimizer, it, run_name)
     
@@ -674,7 +677,7 @@ class RTBModel(nn.Module):
         steps = list(range(len(traj)))
         steps = [step for step in steps[:-1] if step not in no_grad_steps]
 
-        for i, batch_steps in enumerate(utils.create_batches(steps, traj_batch)):
+        for i, batch_steps in enumerate(utils_rtb.create_batches(steps, traj_batch)):
 
             #pbar.set_description(f"Sampling from the posterior | batch = {i}/{int(len(steps)//batch_size)} - {i*100/len(steps)//batch_size:.2f}%")
 
