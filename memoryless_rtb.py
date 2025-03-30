@@ -365,7 +365,7 @@ class RTBModel(nn.Module):
                                 "log_r": logr.item(), "epoch": it})
                 else:
                     with torch.no_grad():
-   
+                        self.model.eval()
                         logs = self.forward(
                                 shape=(10, *D),
                                 steps=self.steps, ode=True)
@@ -439,6 +439,8 @@ class RTBModel(nn.Module):
                             #log_dict['fid_uncond'] = fid_score_all
 
                         wandb.log(log_dict)
+                        
+                        self.model.train() 
 
                         # save model and optimizer state
                         self.save_checkpoint(self.model, optimizer, it, run_name)
