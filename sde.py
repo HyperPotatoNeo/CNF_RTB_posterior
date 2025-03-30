@@ -144,3 +144,60 @@ class DDPM():
             coeff = cos_phi_t / cos_phi_0
             std = torch.sqrt(1. - coeff**2)
             return coeff, std
+        
+
+
+# Memoryless SDE that as same marginal with Flow Matching ODE introduced in the paper "Adjoint Matching (Domingo-Enrich et al., 2024)"
+
+class MemorylessSDE():
+    def __init__(
+        self,
+        device,
+        epsilon: float = 1e-5,
+        **kwargs
+    ):
+        super().__init__()
+        self.sde_type = 'mlsde'
+        self.device = device 
+        self.epsilon = epsilon
+
+    def beta(self, t: Tensor):
+        return 1-t
+    
+    def alpha(self, t: Tensor):
+        return t
+    
+    def alpha_dot(self, t: Tensor):
+        return 1.0
+    
+    def beta_dot(self, t: Tensor):
+        return -1.0
+    
+    def sigma(self, t: Tensor) -> Tensor:
+        return torch.sqrt(2.0 * self.eta(t))
+    
+    def kappa(self, t: Tensor):
+        kappa = self.alpha_dot(t) / (self.alpha(t) + self.epsilon)
+        kappa = torch.clamp(kappa, min=0.1, max=20)
+        return kappa 
+
+    def eta(self, t: Tensor):
+        return self.beta(t) * (self.kappa(t) * self.beta(t) - self.beta_dot(t))
+
+    def prior(self, shape):
+        mu = torch.zeros(shape).to(self.device)
+        return Independent(Normal(loc=mu, scale=1., validate_args=False), len(shape))
+
+    def diffusion(self, t: Tensor, x: Tensor) -> Tensor:  
+        _, *D = x.shape
+        eta_clamped = 2.0 *self.eta(t)
+        eta_clamped = torch.clamp(eta_clamped, min=0.01, max=10)  # was prev max ar 20
+        return torch.sqrt(eta_clamped).view(-1, *[1]*len(D))
+
+    # backward drift
+    def drift(self, t: Tensor, x: Tensor) -> Tensor:
+        _, *D = x.shape
+        return -self.kappa(t).view(-1, *[1]*len(D)) * x
+
+
+
