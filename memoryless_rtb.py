@@ -46,6 +46,7 @@ class RTBModel(nn.Module):
                  tb = False,
                  load_ckpt = False,
                  load_ckpt_path = None,
+                 load_latest = True,
                  entity = 'swish',
                  diffusion_steps=100, 
                  beta_start=1.0, 
@@ -79,6 +80,9 @@ class RTBModel(nn.Module):
         self.use_rb = False if replay_buffer is None else True
 
         self.langevin = langevin 
+
+        if self.langevin:
+            print("Using Langevin!")
 
         # for run name
         self.id = id 
@@ -171,10 +175,14 @@ class RTBModel(nn.Module):
 
         # for lora
         if self.lora:
-            lora_path = savedir + 'checkpoint_'+str(epoch) + "_lora" 
+            lora_path = savedir + 'checkpoint_'+str(epoch) + "_lora.pth" 
             self.model.save_pretrained(lora_path)
             print(f"Lora peft saved at: {lora_path}")
 
+
+    def get_latest_checkpoint(self):
+        self.load_latest_ckpt_path = self.load_ckpt_path 
+        return self.load_latest_ckpt_path 
 
     def load_checkpoint(self, model, optimizer):
         if self.load_ckpt_path is None:
@@ -186,7 +194,9 @@ class RTBModel(nn.Module):
         if not self.lora:
             model.load_state_dict(checkpoint['model_state_dict'])
         else:
-            set_peft_model_state_dict(model, checkpoint, adapter_name = "lora")
+            model.load_state_dict(checkpoint['model_state_dict'])
+            #lora_checkpoint = torch.load(self.load_ckpt_path[:-4]+"_lora.pth")
+            #set_peft_model_state_dict(model, lora_checkpoint, adapter_name = "lora")
         
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         print(f"Checkpoint loaded from {self.load_ckpt_path}")
@@ -213,7 +223,7 @@ class RTBModel(nn.Module):
         if self.langevin:
             with torch.set_grad_enabled(True):
                 x.requires_grad = True
-                log_rx = self.log_reward(x)
+                log_rx = self.log_reward(x, diff=True)
                 grad_log_rx = torch.autograd.grad(log_rx.sum(), x, create_graph=True)[0]
                 
             lp_correction = grad_log_rx#.detach()
@@ -227,7 +237,7 @@ class RTBModel(nn.Module):
         if anneal and it < anneal_steps:
             beta = ((anneal_steps - it)/anneal_steps) * self.beta_start + (it / anneal_steps) * self.beta_end
         else:
-            beta = self.beta_start 
+            beta = self.beta_end #self.beta_start 
 
         return beta 
 
@@ -235,8 +245,12 @@ class RTBModel(nn.Module):
     def prior_log_prob(self, x):
         return self.latent_prior.log_prob(x).sum(dim = tuple(range(1, len(x.shape))))
 
-    def log_reward(self, x, return_img=False):
-        with torch.no_grad():
+    def log_reward(self, x, return_img=False, diff=False):
+        if not diff:
+            with torch.no_grad():
+                img = (x * 127.5 + 128).clip(0, 255)
+                log_r = self.reward_model(img, *self.reward_args).to(self.device)
+        else:
             img = (x * 127.5 + 128).clip(0, 255)
             log_r = self.reward_model(img, *self.reward_args).to(self.device)
         if return_img:
@@ -300,7 +314,7 @@ class RTBModel(nn.Module):
         
 
         optimizer = torch.optim.Adam(self.param_list, lr=learning_rate)
-        run_name = self.id + '_sde_' + self.sde_type + '_NL_RTB' +'_steps_' + str(self.steps) + '_lr_' + str(learning_rate) + '_beta_start_' + str(self.beta_start) + '_beta_end_' + str(self.beta_end) + '_anneal_' + str(anneal) + '_prior_prob_' + str(prior_sample_prob) + '_rb_prob_' + str(replay_buffer_prob) + "_lora_" + str(self.lora) + "_rank_"+ str(self.lora_rank) + "_clip_x_"+str(self.clip_x) + "_post_ratio_" + str(self.posterior_ratio)
+        run_name = self.id + '_sde_' + self.sde_type + '_NL_RTB' +'_steps_' + str(self.steps) + '_lr_' + str(learning_rate) + '_beta_start_' + str(self.beta_start) + '_beta_end_' + str(self.beta_end) + '_anneal_' + str(anneal) + '_prior_prob_' + str(prior_sample_prob) + '_rb_prob_' + str(replay_buffer_prob) + "_lora_" + str(self.lora) + "_rank_"+ str(self.lora_rank) + "_clip_x_"+str(self.clip_x) + "_post_ratio_" + str(self.posterior_ratio) + "_lgv_"+str(self.langevin) +"_cont"
         
         
         if self.load_ckpt:
@@ -445,6 +459,131 @@ class RTBModel(nn.Module):
                         # save model and optimizer state
                         self.save_checkpoint(self.model, optimizer, it, run_name)
     
+    def eval(self, shape, inf_steps, compute_fid, exp, class_label):
+        B, *D = shape
+
+        wandb_track = True 
+        run_name = "EVAL_" + self.id + '_sde_' + self.sde_type + '_NL_RTB' +'_steps_' + str(self.steps) + '_beta_start_' + str(self.beta_start) + '_beta_end_' + str(self.beta_end) + "_lora_" + str(self.lora) + "_rank_"+ str(self.lora_rank) + "_clip_x_"+str(self.clip_x) + "_post_ratio_" + str(self.posterior_ratio) + "_lgv_"+str(self.langevin) 
+        
+        # not used, only for checkpoint loading
+        optimizer = torch.optim.Adam(self.param_list, lr=1e-5)
+
+        if self.load_ckpt:
+            self.model, optimizer, load_it = self.load_checkpoint(self.model, optimizer)
+        else:
+            load_it = 0
+      
+        # do inference with this number of steps
+        self.prior_model.num_inference_steps = inf_steps
+        self.steps = inf_steps 
+
+        self.prior_model.prior_model.eval() 
+        self.model.eval() 
+
+        if wandb_track:
+            wandb.init(
+                project='cfm_posterior',
+                entity=self.entity,
+                save_code=True,
+                name=run_name
+            )
+            hyperparams = {
+                "eval": True,
+                "reward_args": self.reward_args,
+                "beta_start": self.beta_start,
+                "beta_end": self.beta_end,
+                "diffusion_inf_steps": inf_steps
+            }
+
+            wandb.config.update(hyperparams)
+            with torch.no_grad():
+
+                #img = self.integration(self.prior_model, 10, self.in_shape, steps = self.steps, ode = True)
+                
+                 
+
+                x = torch.randn(B, *D, device=self.device)
+                img = self.prior_model(x)
+                prior_reward = self.reward_model(img, *self.reward_args)
+            wandb.log({"prior_samples": [wandb.Image(img[k], caption = prior_reward[k]) for k in range(len(img))]})
+            
+
+        with torch.no_grad():
+            self.model.eval()
+            logs = self.forward(
+                    shape=(B, *D),
+                    steps=self.steps, ode=True)
+
+            x = logs['x_mean_posterior']
+            img = (x * 127.5 + 128)
+            post_reward = self.reward_model(img, *self.reward_args)
+            logZ_ode = (self.beta * post_reward + logs['logpf_prior'] - logs['logpf_posterior']).mean()
+
+            
+            logs_sde = self.forward(
+                shape = (100, *D),
+                steps = self.steps, ode=False
+            )
+            x_sde = logs_sde['x_mean_posterior']
+            img_sde = (x_sde * 127.5 + 128)
+            post_sde_reward = self.reward_model(img_sde, *self.reward_args)
+            logZ_sde = (self.beta * post_sde_reward + logs_sde['logpf_prior'] - logs_sde['logpf_posterior']).mean()            
+            
+            
+            log_dict = {"posterior_samples": [wandb.Image(img[k], caption=post_reward[k]) for k in range(len(img))],
+                        "logZ_ode": logZ_ode.item(), "log_r_ode": post_reward.mean().item(), 
+                        "logZ_sde": logZ_sde.item(), "log_r_sde": post_sde_reward.mean().item()}
+
+
+
+            if compute_fid:
+                print('COMPUTING FID:')
+                generated_images_dir = f'fid/{exp}_nl_rtb_cifar10_class_EVAL_{class_label}'
+
+                if not os.path.exists(generated_images_dir):
+                    os.makedirs(generated_images_dir)
+
+                true_images_dir = 'fid/cifar10_class_' + str(class_label)
+
+                true_images_dir_all = 'fid/cifar10_class_all'
+
+                post_reward_test = 0
+                logZ_test = 0
+
+                for k in range(60):
+                    with torch.no_grad():
+                        logs = self.forward(
+                            shape=(100, *D),
+                            steps=self.steps,
+                            ode=True
+                            )
+                        x = logs['x_mean_posterior']
+                        
+                        img_fid = (x * 127.5 + 128).clip(0, 255).to(torch.uint8)
+
+                        post_reward_test += self.reward_model(img_fid, *self.reward_args)
+                        logZ_test += (self.beta * post_reward_test + logs['logpf_prior'] - logs['logpf_posterior']).mean()
+
+                        for i, img_tensor in enumerate(img_fid):
+                            img_pil = transforms.ToPILImage()(img_tensor)
+                            img_pil.save(os.path.join(generated_images_dir, f'{k*100 + i}.png'))
+                
+                post_reward_test /= 60
+                logZ_test /= 60
+                
+                fid_score = fid.compute_fid(generated_images_dir, true_images_dir)
+                
+                log_dict['log_r_test'] = post_reward_test.mean().item()
+                log_dict['logZ_test'] = logZ_test.item()
+                log_dict['fid'] = fid_score
+
+                #fid_score_all = fid.compute_fid(generated_images_dir, true_images_dir_all) 
+                #log_dict['fid_uncond'] = fid_score_all
+
+            wandb.log(log_dict)
+
+        return 
+
     # Euler-Maruyama integration of memoryless flow matching SDE 
     def integration(
             self,
@@ -553,15 +692,18 @@ class RTBModel(nn.Module):
                 continue # continue instead of break because it works for forward and backward
             g = self.sde.diffusion(t, x)
 
+            lgv_correction = self.get_langevin_correction(x)
+            lgv_term = (g**2) * lgv_correction
+
             # Euler intergration: x = x + v(x) * dt + g * dW
             if ode:
-                x_mean_posterior = x + (self.posterior_ratio * self.model(t, x) + (1-self.posterior_ratio)*self.prior_model.drift(t, x).detach()) * dt
+                x_mean_posterior = x + (self.posterior_ratio * (self.model(t, x) + lgv_term) + (1-self.posterior_ratio)*self.prior_model.drift(t, x).detach()) * dt
                 x = x_mean_posterior
             # Equivalent SDE that has the same marginal as the ODE
             # x = (2 * v(x) - kappa(x) * x) * dt + g * dW
             else:
 
-                posterior_drift = 2*(self.posterior_ratio * self.model(t, x) + (1-self.posterior_ratio) * self.prior_model.drift(t, x).detach()) + self.sde.drift(t, x)
+                posterior_drift = 2*(self.posterior_ratio * (self.model(t, x) + lgv_term) + (1-self.posterior_ratio) * self.prior_model.drift(t, x).detach()) + self.sde.drift(t, x)
 
                 f_posterior = posterior_drift
                 x_mean_posterior = x + f_posterior * dt # * (-1.0 if backward else 1.0)
@@ -712,7 +854,10 @@ class RTBModel(nn.Module):
 
             g = self.sde.diffusion(t_, xs).to(self.device)
             
-            f_posterior = 2*((1-self.posterior_ratio)*self.prior_model.drift(t_[:,0,0,0], xs).detach() + self.posterior_ratio*self.model(t_[:,0,0,0], xs)) + self.sde.drift(t_, xs)
+            lgv_correction = self.get_langevin_correction(xs)
+            lgv_term = (g**2) * lgv_correction
+
+            f_posterior = 2*((1-self.posterior_ratio)*self.prior_model.drift(t_[:,0,0,0], xs).detach() + self.posterior_ratio*(self.model(t_[:,0,0,0], xs) + lgv_term)) + self.sde.drift(t_, xs)
 
 
             #f_posterior = (2 * self.model(t_[:,0,0,0], xs)) + self.sde.drift(t_, xs)

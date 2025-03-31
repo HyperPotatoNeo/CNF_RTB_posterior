@@ -58,6 +58,8 @@ parser.add_argument('--lora_rank', default=16, type=int, help='rank when using L
 parser.add_argument('--clip_x', default=False, type=strtobool, help='clip x between [-1,1] during sampling (for images)')
 #parser.add_argument('--')
 
+parser.add_argument('--eval', default=False, type=strtobool, help='Whether to eval model or not (with 50 diff steps)')
+
 args = parser.parse_args()
 
 posterior_architecture = 'unet'
@@ -243,8 +245,12 @@ else:
                 replay_buffer = replay_buffer,
                 posterior_architecture = posterior_architecture)
 
-
+"""
 if args.langevin:
     rtb_model.pretrain_trainable_reward(n_iters = 20, batch_size = args.batch_size, learning_rate = args.lr, wandb_track = False) #args.wandb_track)
+"""
 
-rtb_model.finetune(shape=(args.batch_size, *in_shape), n_iters = args.n_iters, wandb_track=args.wandb_track, learning_rate=args.lr, prior_sample_prob=args.prior_sample_prob, replay_buffer_prob=args.replay_buffer_prob, anneal=args.anneal, anneal_steps=args.anneal_steps, exp=args.exp, compute_fid=args.compute_fid, class_label=args.target_class)
+if args.eval:
+    rtb_model.eval(shape = (args.batch_size, *in_shape), inf_steps = 50, compute_fid = True, exp = args.exp, class_label = args.target_class)
+else:
+    rtb_model.finetune(shape=(args.batch_size, *in_shape), n_iters = args.n_iters, wandb_track=args.wandb_track, learning_rate=args.lr, prior_sample_prob=args.prior_sample_prob, replay_buffer_prob=args.replay_buffer_prob, anneal=args.anneal, anneal_steps=args.anneal_steps, exp=args.exp, compute_fid=args.compute_fid, class_label=args.target_class)
